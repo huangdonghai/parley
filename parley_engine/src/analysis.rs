@@ -864,6 +864,63 @@ fn has_word_dictionary(script: Script) -> bool {
         )
 }
 
+/// Resolves the bidi level of an object replacement character (U+FFFC) inserted at each of the
+/// given byte offsets of `text`.
+///
+/// Inline boxes take part in the Unicode bidirectional algorithm as an object replacement
+/// character (UAX #9 § 3.1.1), so their level is the level that character would be assigned. It is
+/// not necessarily the level of the preceding text run.
+#[doc(hidden)]
+pub fn object_replacement_levels(
+    text: &str,
+    base_direction: BaseDirection,
+    offsets: &[usize],
+) -> Vec<BidiLevel> {
+    if offsets.is_empty() {
+        return Vec::new();
+    }
+
+    let data_sources = AnalysisDataSources::new();
+
+    // Build the character sequence with a U+FFFC inserted at each offset, remembering the index of
+    // each inserted character so its resolved level can be read back afterwards.
+    let mut chars = Vec::with_capacity(text.chars().count() + offsets.len());
+    let mut inserted = Vec::with_capacity(offsets.len());
+    let mut offsets = offsets.iter().copied().peekable();
+    let mut byte_index = 0;
+    for ch in text.chars() {
+        while let Some(&offset) = offsets.peek() {
+            if offset > byte_index {
+                break;
+            }
+            inserted.push(chars.len());
+            chars.push('\u{FFFC}');
+            offsets.next();
+        }
+        chars.push(ch);
+        byte_index += ch.len_utf8();
+    }
+    for _ in offsets {
+        inserted.push(chars.len());
+        chars.push('\u{FFFC}');
+    }
+
+    let mut resolver = bidi::BidiResolver::default();
+    resolver.resolve(
+        chars.iter().copied().map(|ch| {
+            let bidi_class = data_sources.properties(ch).bidi_class();
+            let bracket = data_sources.brackets().get(ch);
+            (ch, (bidi_class, bracket))
+        }),
+        base_direction,
+    );
+
+    inserted
+        .into_iter()
+        .map(|index| resolver.levels[index])
+        .collect()
+}
+
 #[cfg(test)]
 mod test {
     use alloc::vec::Vec;

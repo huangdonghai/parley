@@ -73,12 +73,7 @@ pub(crate) fn align<B: Brush>(
 ) {
     layout.alignment = Some(alignment);
 
-    // In a vertical writing mode with `direction: rtl` the inline axis is reversed (CSS Writing
-    // Modes 3 §6.4), which `Line::inline_position` applies by mirroring the line. Offsets are
-    // computed on the unmirrored axis, so `start`/`end` already resolve to the bottom/top sides
-    // there, but the line-relative `left`/`right` sides have to swap.
-    let reversed = layout.inline_axis_reversed();
-    let is_rtl = layout.base_level.is_rtl() && !reversed;
+    let is_rtl = layout.base_level.is_rtl();
 
     // Apply alignment to line items
     for line in &mut layout.lines {
@@ -116,18 +111,6 @@ pub(crate) fn align<B: Brush>(
             Alignment::Start
         } else {
             alignment
-        };
-        // `left` and `right` are line-relative (CSS Writing Modes 3 §6.3), so they follow the
-        // mirroring: in vertical writing modes `left` is the top side, which lands at the far end
-        // of the unmirrored axis.
-        let line_alignment = if reversed {
-            match line_alignment {
-                Alignment::Left => Alignment::Right,
-                Alignment::Right => Alignment::Left,
-                other => other,
-            }
-        } else {
-            line_alignment
         };
 
         match (line_alignment, is_rtl) {

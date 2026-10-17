@@ -190,6 +190,21 @@ pub(crate) fn shape_text<'a, B: Brush>(
         &mut layout.data.shaped_text,
     );
 
+    // Inline boxes take part in the bidi algorithm as an object replacement character (U+FFFC), so
+    // their level is resolved separately from the text runs they sit between. Taking the level of
+    // the preceding run instead misplaces boxes at the boundary of an LTR run inside RTL text.
+    let box_bidi_levels = if inline_boxes.is_empty() {
+        Vec::new()
+    } else {
+        let base_direction = if analysis.paragraph_level().is_rtl() {
+            parley_engine::BaseDirection::Rtl
+        } else {
+            parley_engine::BaseDirection::Ltr
+        };
+        let offsets: Vec<usize> = inline_boxes.iter().map(|b| b.inline_box.index).collect();
+        parley_engine::object_replacement_levels(text, base_direction, &offsets)
+    };
+
     let mut inline_box_iter = inline_boxes
         .iter()
         .map(|b| &b.inline_box)
@@ -202,18 +217,9 @@ pub(crate) fn shape_text<'a, B: Brush>(
         let run_style = &styles[usize::from(run_style_index)];
 
         // Push inline boxes positioned before the start of this item.
-        //
-        // TODO: this lets the inline box take the bidi level of the previous run, but in principle
-        // inline boxes should be included in bidi analysis as an object replacement character
-        // (U+FFFC). The box should then take the bidi level of that character.
-        let prev_bidi_level = if shaped_run_idx > 0 {
-            layout.data.shaped_text.runs()[&shaped_run_idx - 1].bidi_level
-        } else {
-            BidiLevel::new(0)
-        };
         while let Some((box_idx, inline_box)) = inline_box_iter.peek() {
             if inline_box.index <= run_text_byte_start {
-                layout.data.push_inline_box(*box_idx, prev_bidi_level);
+                layout.data.push_inline_box(*box_idx, box_bidi_levels[*box_idx]);
                 inline_box_iter.next();
             } else {
                 break;
@@ -233,19 +239,9 @@ pub(crate) fn shape_text<'a, B: Brush>(
         );
     }
 
-    // Process any remaining inline boxes whose index is greater than the length of the text
-    //
-    // Give the box the same bidi level as the last text run (or else default to 0 if there is no
-    // text run).
-    let bidi_level = layout
-        .data
-        .shaped_text
-        .runs()
-        .last()
-        .map(|r| r.bidi_level)
-        .unwrap_or(BidiLevel::new(0));
+    // Process any remaining inline boxes whose index is greater than the length of the text.
     for (box_idx, _inline_box) in inline_box_iter {
-        layout.data.push_inline_box(box_idx, bidi_level);
+        layout.data.push_inline_box(box_idx, box_bidi_levels[box_idx]);
     }
 }
 

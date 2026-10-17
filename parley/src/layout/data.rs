@@ -298,16 +298,6 @@ impl<B: Brush> LayoutData<B> {
         self.alignment = None;
     }
 
-    /// Whether the inline axis runs against Parley's inline coordinate.
-    ///
-    /// In a vertical writing mode, `direction: rtl` sets the inline base direction bottom-to-top
-    /// (CSS Writing Modes 3 §6.4: the inline-start side is the bottom side), while Parley's inline
-    /// coordinates always grow downwards for vertical text. Inline positions therefore have to be
-    /// mirrored within the line.
-    pub(crate) fn inline_axis_reversed(&self) -> bool {
-        self.vertical && self.base_level.is_rtl()
-    }
-
     /// Push an inline box to the list of items
     pub(crate) fn push_inline_box(&mut self, index: usize, bidi_level: BidiLevel) {
         self.items.push(LayoutItem {

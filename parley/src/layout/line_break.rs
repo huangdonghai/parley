@@ -123,6 +123,13 @@ struct LineBoxMetrics {
     line_relative_top_height: f32,
     /// Height of the tallest `vertical-align: bottom` inline box.
     line_relative_bottom_height: f32,
+    /// Whether the block axis is the physical horizontal axis (vertical writing mode). Line boxes
+    /// are then sized by [`Self::max_extent`] rather than by the root subtree's `over + under`.
+    vertical: bool,
+    /// Largest whole extent (`over + under`) of any box on the line, measured from that box's own
+    /// baseline. In vertical writing modes a font's ascent and descent map to the inline axis, so
+    /// boxes must not be combined as `max(over) + max(under)` (CSS Writing Modes 3 §7.1).
+    max_extent: f32,
     /// Whether the line has any text or non-empty in-flow inline box. A line with only empty
     /// inline boxes is treated as having zero height (an "invisible" line box).
     has_content: bool,
@@ -299,6 +306,8 @@ impl Default for LineBoxMetrics {
             non_root_height: 0.,
             line_relative_top_height: 0.,
             line_relative_bottom_height: 0.,
+            vertical: false,
+            max_extent: 0.,
             has_content: false,
             last_text: (usize::MAX, 0),
         }
@@ -306,9 +315,11 @@ impl Default for LineBoxMetrics {
 }
 
 impl LineBoxMetrics {
-    /// Reset to an empty line.
+    /// Reset to an empty line, keeping the writing mode it was configured for.
     fn reset(&mut self) {
+        let vertical = self.vertical;
         *self = Self::default();
+        self.vertical = vertical;
     }
 
     /// Add a box whose baseline is `baseline_offset` above the baseline of the aligned subtree
@@ -323,6 +334,7 @@ impl LineBoxMetrics {
     ) {
         if aligned_subtree_root == 0 {
             self.root.add(baseline_offset, metrics);
+            self.max_extent = self.max_extent.max(metrics.over + metrics.under);
         } else {
             let subtree = subtrees.grow(aligned_subtree_root, baseline_offset, metrics);
             self.non_root_height = self.non_root_height.max(subtree.line_box.height());
@@ -330,11 +342,17 @@ impl LineBoxMetrics {
     }
 
     /// The line height seen so far.
+    ///
+    /// In vertical writing modes the block axis runs across the font's inline extents, so ascent
+    /// and descent must not be added up: the line is only as tall as its tallest box.
     #[inline]
     fn line_height(&self) -> f32 {
-        self.root
-            .line_box
-            .height()
+        let root_height = if self.vertical {
+            self.max_extent
+        } else {
+            self.root.line_box.height()
+        };
+        root_height
             .max(self.non_root_height)
             .max(self.line_relative_top_height)
             .max(self.line_relative_bottom_height)
@@ -864,7 +882,9 @@ impl<'a, B: Brush> BreakLines<'a, B> {
     ///
     /// The line starts out containing the root span box (the "strut", CSS 2 §10.8).
     fn reset_line(&mut self) {
+        let vertical = self.layout.data.vertical;
         let state = &mut self.state;
+        state.line.box_metrics.vertical = vertical;
         state.line.reset();
         state.contributed.clear();
         state.subtrees.clear();
@@ -1606,6 +1626,14 @@ impl<'a, B: Brush> BreakLines<'a, B> {
         };
         line.metrics.baseline = top + line_box_extents.over;
         line.metrics.block_min_coord = top;
+        // In vertical writing modes the line box is sized by its tallest box rather than by the
+        // root subtree's extents (see `LineBoxMetrics::line_height`), so the space below the
+        // baseline has to be derived from the resulting line height.
+        let under = if self.layout.data.vertical {
+            (box_metrics.line_height() - line_box_extents.over).max(0.)
+        } else {
+            line_box_extents.under
+        };
         line.metrics.block_max_coord = if quantize {
             // TODO: perhaps this should be something like the following, to ensure quantized line
             // boxes tile exactly without gaps or overlap. However, that would cause some
@@ -1613,9 +1641,9 @@ impl<'a, B: Brush> BreakLines<'a, B> {
             // ```
             // (self.state.line_y as f32 + self.state.line.box_metrics.line_height()).round()
             // ```
-            (line.metrics.baseline + line_box_extents.under).round()
+            (line.metrics.baseline + under).round()
         } else {
-            line.metrics.baseline + line_box_extents.under
+            line.metrics.baseline + under
         };
         line.metrics.content_block_min_coord = line.metrics.baseline - content_box_extents.over;
         line.metrics.content_block_max_coord = line.metrics.baseline + content_box_extents.under;

@@ -195,6 +195,14 @@ pub(crate) struct LayoutData<B: Brush> {
     pub(crate) scale: f32,
     /// Whether metrics should be quantized to pixel boundaries
     pub(crate) quantize: bool,
+    /// Whether the block axis is the physical horizontal axis (vertical writing modes).
+    ///
+    /// Parley lays text out in the container's own axes, so for vertical writing modes the block
+    /// axis only becomes horizontal after the caller transposes the output. Sizing the line box as
+    /// `max(over) + max(under)` is then wrong: a font's ascent and descent belong to the inline
+    /// axis, and must not stretch the block axis. In this mode line boxes are instead sized by the
+    /// largest single box extent, see `LineBoxMetrics::line_height`.
+    pub(crate) vertical: bool,
     /// The `BiDi` base level
     pub(crate) base_level: BidiLevel,
     /// The length of the text in the layout
@@ -243,6 +251,7 @@ impl<B: Brush> Default for LayoutData<B> {
         Self {
             scale: 1.,
             quantize: true,
+            vertical: false,
             base_level: BidiLevel::new(0),
             text_len: 0,
             width: 0.,

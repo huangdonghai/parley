@@ -48,6 +48,16 @@ impl<B: Brush> Layout<B> {
         Self::default()
     }
 
+    /// Sets whether the layout's block axis is the physical horizontal axis.
+    ///
+    /// Callers that transpose parley's output for vertical writing modes set this before breaking
+    /// lines. It only changes how line boxes are sized: a line's block-axis size becomes the
+    /// largest single box extent instead of `max(over) + max(under)`. See
+    /// [`LayoutData::vertical`](crate::layout::data::LayoutData::vertical).
+    pub fn set_vertical(&mut self, vertical: bool) {
+        self.data.vertical = vertical;
+    }
+
     /// Clears the layout while retaining capacity.
     ///
     /// This clears underlying strong references to fonts, which would otherwise

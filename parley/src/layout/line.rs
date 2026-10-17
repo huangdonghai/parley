@@ -108,6 +108,22 @@ impl<'a, B: Brush> Line<'a, B> {
         }
     }
 
+    /// Maps an inline-axis interval `[start, start + width)` within the line to the axis the
+    /// caller lays out in.
+    ///
+    /// Parley's inline coordinates grow in the direction of the inline base direction of an
+    /// LTR paragraph. Where that direction is reversed — a vertical writing mode combined with
+    /// `direction: rtl` (CSS Writing Modes 3 §6.4) — the line's inline axis is mirrored, so an
+    /// interval's position becomes its distance from the opposite edge.
+    fn inline_position(&self, start: f32, width: f32) -> f32 {
+        if self.layout.data.inline_axis_reversed() {
+            let metrics = &self.data.metrics;
+            metrics.inline_min_coord + metrics.inline_max_coord - start - width
+        } else {
+            start
+        }
+    }
+
     /// Returns an iterator over the runs for the line.
     pub fn runs(&self) -> impl Iterator<Item = Run<'a, B>> + 'a + Clone + use<'a, B> {
         self.items_nonpositioned().filter_map(|item| item.run())
@@ -430,9 +446,12 @@ impl<'a, B: Brush> Iterator for GlyphRunIter<'a, B> {
             let item = self.line.item(self.item_index)?;
             match item {
                 LineItem::InlineBox(inline_box) => {
-                    let x = self.offset
-                        + self.line.data.metrics.inline_min_coord
-                        + self.line.data.metrics.offset;
+                    let x = self.line.inline_position(
+                        self.offset
+                            + self.line.data.metrics.inline_min_coord
+                            + self.line.data.metrics.offset,
+                        inline_box.width,
+                    );
                     let box_index = self.line.layout.data.line_items
                         [self.line.data.item_range.start + self.item_index]
                         .index;
@@ -502,9 +521,12 @@ impl<'a, B: Brush> Iterator for GlyphRunIter<'a, B> {
                             run,
                             style_index,
                             shaped_clusters,
-                            offset: offset
-                                + self.line.data.metrics.inline_min_coord
-                                + self.line.data.metrics.offset,
+                            offset: self.line.inline_position(
+                                offset
+                                    + self.line.data.metrics.inline_min_coord
+                                    + self.line.data.metrics.offset,
+                                advance,
+                            ),
                             baseline: self.line.style_baseline(style_index),
                             advance,
                         }));

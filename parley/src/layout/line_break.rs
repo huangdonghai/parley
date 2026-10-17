@@ -1728,12 +1728,13 @@ fn commit_line<B: Brush>(
     // The line's source text range, as the union of the ranges of the text runs committed to it.
     let mut text_start = usize::MAX;
     let mut text_end = 0;
-    // Mark line as needing bidi re-ordering if it contains any runs with non-zero bidi level
+    // Mark line as needing bidi re-ordering if it contains any item with a non-zero bidi level
     // (zero is the default level, so this is equivalent to marking lines that have multiple levels)
     let mut needs_reorder = false;
     for (i, item) in items_to_commit.iter().enumerate() {
         match item.kind {
             LayoutItemKind::InlineBox => {
+                needs_reorder |= item.bidi_level != BidiLevel::new(0);
                 lines.line_items.push(LineItemData {
                     kind: LayoutItemKind::InlineBox,
                     index: item.index,

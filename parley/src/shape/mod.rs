@@ -19,7 +19,7 @@ use crate::util::{nearly_eq, nearly_zero};
 use crate::{FontContext, FontData, Spacing};
 
 use fontique::{self, Query, QueryFamily, QueryFont};
-use parlance::{BidiLevel, GenericFamily, Tag};
+use parlance::{GenericFamily, Tag};
 
 /// If these font features are passed to the shaper, optional ligatures are not applied.
 ///
@@ -61,12 +61,27 @@ pub(crate) fn shape_text<'a, B: Brush>(
         text = " ";
     }
 
+    // Inline boxes take part in the bidi algorithm as an object replacement character (U+FFFC), so
+    // their level is resolved separately from the text runs they sit between. Taking the level of
+    // the preceding run instead misplaces boxes at the boundary of an LTR run inside RTL text.
+    let box_bidi_levels = if inline_boxes.is_empty() {
+        Vec::new()
+    } else {
+        let base_direction = if analysis.paragraph_level().is_rtl() {
+            parley_engine::BaseDirection::Rtl
+        } else {
+            parley_engine::BaseDirection::Ltr
+        };
+        let offsets: Vec<usize> = inline_boxes.iter().map(|b| b.inline_box.index).collect();
+        parley_engine::object_replacement_levels(text, base_direction, &offsets)
+    };
+
     // Do nothing if there is no text or styles (there should always be a default style)
     if text.is_empty() || styles.is_empty() {
         // Process any remaining inline boxes whose index is greater than the length of the text
         for box_idx in 0..inline_boxes.len() {
             // Push the box to the list of items
-            layout.data.push_inline_box(box_idx, BidiLevel::new(0));
+            layout.data.push_inline_box(box_idx, box_bidi_levels[box_idx]);
         }
         return;
     }
@@ -189,21 +204,6 @@ pub(crate) fn shape_text<'a, B: Brush>(
         font_selector,
         &mut layout.data.shaped_text,
     );
-
-    // Inline boxes take part in the bidi algorithm as an object replacement character (U+FFFC), so
-    // their level is resolved separately from the text runs they sit between. Taking the level of
-    // the preceding run instead misplaces boxes at the boundary of an LTR run inside RTL text.
-    let box_bidi_levels = if inline_boxes.is_empty() {
-        Vec::new()
-    } else {
-        let base_direction = if analysis.paragraph_level().is_rtl() {
-            parley_engine::BaseDirection::Rtl
-        } else {
-            parley_engine::BaseDirection::Ltr
-        };
-        let offsets: Vec<usize> = inline_boxes.iter().map(|b| b.inline_box.index).collect();
-        parley_engine::object_replacement_levels(text, base_direction, &offsets)
-    };
 
     let mut inline_box_iter = inline_boxes
         .iter()

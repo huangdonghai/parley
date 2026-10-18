@@ -1150,8 +1150,11 @@ impl<'a, B: Brush> BreakLines<'a, B> {
                         let first_character = &atom.characters()[0];
                         let whitespace = first_character.whitespace;
                         let is_newline = whitespace == Whitespace::Newline;
-                        // Whether this atom is a justification opportunity.
-                        let is_separator = is_word_separator(whitespace);
+                        // Whether this atom is a justification opportunity. For scripts that do
+                        // not separate words with spaces, the boundary between two typographic
+                        // character units is an opportunity too (CSS Text 3 6.4.5).
+                        let is_separator = is_word_separator(whitespace)
+                            || first_character.flags.is_cjk_typographic();
                         let is_soft_wrap_opportunity =
                             first_character.flags.is_soft_wrap_opportunity();
                         let max_height_exceeded = self.state.line.max_height_exceeded;
@@ -1389,7 +1392,11 @@ impl<'a, B: Brush> BreakLines<'a, B> {
                         let first_character = &atom.characters()[0];
                         let whitespace = first_character.whitespace;
                         let is_newline = whitespace == Whitespace::Newline;
-                        let is_separator = is_word_separator(whitespace);
+                        // A justification opportunity is a word separator or, for scripts that do
+                        // not separate words with spaces, the boundary between two typographic
+                        // character units (CSS Text 3 6.4.5).
+                        let is_separator = is_word_separator(whitespace)
+                            || first_character.flags.is_cjk_typographic();
                         let advance = spacing.atom_advance(&atom);
 
                         // Compute the x position.

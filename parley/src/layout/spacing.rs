@@ -175,7 +175,11 @@ impl EffectiveSpacing {
         let whitespace = atom.characters()[0].whitespace;
         let mut gaps = self.spacing.gaps(whitespace);
 
-        if is_word_separator(whitespace)
+        // Justification expands word separators and, for scripts that do not separate words with
+        // spaces, the boundary between two typographic character units (CSS Text 3 6.4.5).
+        let is_justification_opportunity = is_word_separator(whitespace)
+            || atom.characters()[0].flags.is_cjk_typographic();
+        if is_justification_opportunity
             && atom.shaped_clusters_range().end <= self.justification.justification_end_cluster
         {
             gaps.after += self.justification.amount_per_opportunity;

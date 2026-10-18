@@ -266,6 +266,13 @@ impl CharacterFlags {
     const WORD_BOUNDARY: u8 = 1 << 3;
     /// Whether there is a soft wrap opportunity before the character.
     const SOFT_WRAP_OPPORTUNITY: u8 = 1 << 4;
+    /// Whether the character is a typographic character unit of a block or clustered script
+    /// (Han, kana, hangul, bopomofo, fullwidth forms, CJK punctuation).
+    ///
+    /// CSS Text 3 6.4.5 requires the boundary between two such units to be a justification
+    /// opportunity, which is how CJK text — which does not separate words with spaces — gets
+    /// justified (`text-align: justify`).
+    const CJK_TYPOGRAPHIC: u8 = 1 << 5;
 
     #[inline(always)]
     pub fn new(source_char: char, is_word_boundary: bool, is_soft_wrap_opportunity: bool) -> Self {
@@ -286,6 +293,11 @@ impl CharacterFlags {
                 }
                 | if is_soft_wrap_opportunity {
                     Self::SOFT_WRAP_OPPORTUNITY
+                } else {
+                    0
+                }
+                | if is_cjk_typographic_char(source_char) {
+                    Self::CJK_TYPOGRAPHIC
                 } else {
                     0
                 },
@@ -314,6 +326,13 @@ impl CharacterFlags {
         self.0 & Self::EMOJI != 0
     }
 
+    /// Whether the character is a typographic character unit of a block or clustered script,
+    /// i.e. a justification opportunity for CJK text (CSS Text 3 6.4.5).
+    #[inline(always)]
+    pub fn is_cjk_typographic(self) -> bool {
+        self.0 & Self::CJK_TYPOGRAPHIC != 0
+    }
+
     /// Returns the number of bytes the source character would need if encoded in UTF-8.
     ///
     /// That number of bytes is always between 1 and 4, inclusive.
@@ -321,6 +340,33 @@ impl CharacterFlags {
     pub fn len_utf8(self) -> usize {
         (self.0 & Self::LEN_UTF8_MASK) as usize + 1
     }
+}
+
+/// Whether `ch` is a typographic character unit of a block or clustered script: the Han, kana,
+/// hangul and bopomofo repertoires plus their punctuation, symbols and compatibility forms.
+///
+/// These are the scripts whose typographic traditions do not separate words with spaces, so the
+/// boundary between two adjacent units is where justification expands (CSS Text 3 6.4.1, 6.4.5).
+fn is_cjk_typographic_char(ch: char) -> bool {
+    matches!(ch as u32,
+        0x2E80..=0x2EFF   // CJK Radicals Supplement
+        | 0x3000..=0x303F // CJK Symbols and Punctuation
+        | 0x3040..=0x30FF // Hiragana + Katakana
+        | 0x3100..=0x312F // Bopomofo
+        | 0x3130..=0x318F // Hangul Compatibility Jamo
+        | 0x31A0..=0x31BF // Bopomofo Extended
+        | 0x31C0..=0x31EF // CJK Strokes
+        | 0x3200..=0x32FF // Enclosed CJK Letters and Months
+        | 0x3300..=0x33FF // CJK Compatibility
+        | 0x3400..=0x4DBF // CJK Unified Ideographs Extension A
+        | 0x4E00..=0x9FFF // CJK Unified Ideographs
+        | 0xAC00..=0xD7AF // Hangul Syllables
+        | 0xF900..=0xFAFF // CJK Compatibility Ideographs
+        | 0xFE10..=0xFE1F // Vertical Forms
+        | 0xFE30..=0xFE4F // CJK Compatibility Forms
+        | 0xFF00..=0xFFEF // Halfwidth and Fullwidth Forms
+        | 0x20000..=0x2FA1F // CJK Unified Ideographs Extensions B..F and Compatibility Supplement
+    )
 }
 
 #[cfg(test)]

@@ -14,11 +14,13 @@ use windows::Win32::Foundation::STATUS_NOT_FOUND;
 use windows::{
     Win32::Graphics::DirectWrite::{
         DWRITE_FACTORY_TYPE_SHARED, DWRITE_FONT_STRETCH_NORMAL, DWRITE_FONT_STYLE_NORMAL,
-        DWRITE_FONT_WEIGHT_REGULAR, DWRITE_READING_DIRECTION,
-        DWRITE_READING_DIRECTION_LEFT_TO_RIGHT, DWriteCreateFactory, IDWriteFactory,
-        IDWriteFactory2, IDWriteFont, IDWriteFontCollection, IDWriteFontFace, IDWriteFontFallback,
-        IDWriteFontFamily, IDWriteFontFile, IDWriteLocalFontFileLoader, IDWriteNumberSubstitution,
-        IDWriteTextAnalysisSource, IDWriteTextAnalysisSource_Impl,
+        DWRITE_FONT_WEIGHT_REGULAR, DWRITE_INFORMATIONAL_STRING_FULL_NAME,
+        DWRITE_INFORMATIONAL_STRING_POSTSCRIPT_NAME, DWRITE_READING_DIRECTION,
+        DWRITE_READING_DIRECTION_LEFT_TO_RIGHT, DWriteCreateFactory,
+        IDWriteFactory, IDWriteFactory2, IDWriteFont, IDWriteFontCollection, IDWriteFontFace,
+        IDWriteFontFallback, IDWriteFontFamily, IDWriteFontFile, IDWriteLocalFontFileLoader,
+        IDWriteLocalizedStrings, IDWriteNumberSubstitution, IDWriteTextAnalysisSource,
+        IDWriteTextAnalysisSource_Impl,
     },
     core::{Interface, OutRef, PCWSTR, implement},
 };
@@ -61,6 +63,14 @@ impl SystemFonts {
                 let id = name_map.get_or_insert(first_name).id();
                 for other_name in other_names {
                     name_map.add_alias(id, other_name);
+                }
+                // CSS `local()` resolves a font by family name, full name or
+                // PostScript name. DirectWrite only reports the family names, so
+                // register the other two as aliases: without them a stylesheet
+                // naming an installed font by either can never find it and
+                // silently falls back to a different font.
+                for name in family.local_names() {
+                    name_map.add_alias(id, &name);
                 }
             }
         }
@@ -272,6 +282,39 @@ impl DWriteFontFamily {
         Some(names)
     }
 
+    /// The remaining names DirectWrite knows for the fonts in this family that
+    /// CSS `local()` also matches: each font's full name and PostScript name.
+    /// These are only exposed as per-font informational strings.
+    fn local_names(&self) -> Vec<String> {
+        let mut names = Vec::new();
+        unsafe {
+            let count = self.0.GetFontCount();
+            for index in 0..count {
+                let Ok(font) = self.0.GetFont(index) else {
+                    continue;
+                };
+                for id in [
+                    DWRITE_INFORMATIONAL_STRING_FULL_NAME,
+                    DWRITE_INFORMATIONAL_STRING_POSTSCRIPT_NAME,
+                ] {
+                    let mut strings: Option<IDWriteLocalizedStrings> = None;
+                    let mut exists = windows_core::BOOL::default();
+                    if font
+                        .GetInformationalStrings(id, &mut strings, &mut exists)
+                        .is_err()
+                        || !exists.as_bool()
+                    {
+                        continue;
+                    }
+                    if let Some(name) = strings.as_ref().and_then(first_string) {
+                        names.push(name);
+                    }
+                }
+            }
+        }
+        names
+    }
+
     fn fonts(&self) -> impl Iterator<Item = DWriteFont> {
         let this = self.0.clone();
         unsafe {
@@ -285,6 +328,20 @@ impl DWriteFontFamily {
                 DWriteFont::new(&font)
             })
         }
+    }
+}
+
+/// Reads the first (usually English) string out of a DirectWrite string list.
+fn first_string(strings: &IDWriteLocalizedStrings) -> Option<String> {
+    unsafe {
+        if strings.GetCount() == 0 {
+            return None;
+        }
+        let len = strings.GetStringLength(0).ok()?;
+        let mut buf = vec![0u16; len as usize + 1];
+        strings.GetString(0, &mut buf).ok()?;
+        buf.pop();
+        Some(String::from_utf16_lossy(&buf))
     }
 }
 

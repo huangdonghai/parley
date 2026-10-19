@@ -285,7 +285,10 @@ fn all_names(
     !result.is_empty()
 }
 
-fn english_or_first<'a>(names: &name::Name<'a>, id: NameId) -> Option<name::NameString<'a>> {
+pub(crate) fn english_or_first<'a>(
+    names: &name::Name<'a>,
+    id: NameId,
+) -> Option<name::NameString<'a>> {
     let mut best_rank = -1;
     let mut best_record = None;
     for (i, record) in names

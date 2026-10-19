@@ -9,7 +9,7 @@ use super::source::{SourceInfo, SourceKind};
 use super::{Blob, source_cache::SourceCache};
 use crate::{FontStyle, FontWeight, FontWidth};
 use core::fmt;
-use read_fonts::{FontRef, TableProvider as _, types::Tag};
+use read_fonts::{FontRef, TableProvider as _, types::NameId, types::Tag};
 use smallvec::SmallVec;
 
 type AxisVec = SmallVec<[AxisInfo; 1]>;
@@ -67,6 +67,31 @@ impl FontInfo {
                 SourceKind::Path(path) => super::source_cache::load_blob(path),
             }
         }
+    }
+
+    /// Whether `name` is this face's full name (name ID 4) or PostScript name
+    /// (name ID 6).
+    ///
+    /// Those are the only names CSS `local()` matches, and it matches them
+    /// against a single face rather than a family
+    /// (<https://www.w3.org/TR/css-fonts-4/#local-font-fallback>). Two weights
+    /// of one family — say `TsukuMinPr6-M` and `TsukuMinPr6-HV` — therefore have
+    /// to be told apart by name, since a family lookup alone cannot say which
+    /// one was asked for.
+    pub fn has_local_name(&self, name: &str, source_cache: Option<&mut SourceCache>) -> bool {
+        let Some(blob) = self.load(source_cache) else {
+            return false;
+        };
+        let Ok(font) = FontRef::from_index(blob.as_ref(), self.index) else {
+            return false;
+        };
+        let Ok(names) = font.name() else {
+            return false;
+        };
+        [NameId::FULL_NAME, NameId::POSTSCRIPT_NAME]
+            .into_iter()
+            .filter_map(|id| crate::scan::english_or_first(&names, id))
+            .any(|candidate| candidate.chars().eq(name.chars()))
     }
 
     /// Returns the visual width of the font-- a relative change from the normal

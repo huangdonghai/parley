@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
 use crate::layout::Style;
+use crate::layout::cluster::Cluster;
 use crate::layout::data::BreakReason;
 use crate::layout::data::{LayoutItemKind, LineData};
 use crate::layout::layout::Layout;
@@ -331,6 +332,24 @@ impl<'a, B: Brush> GlyphRun<'a, B> {
     /// Returns an iterator over the glyphs in the run.
     pub fn glyphs(&'a self) -> impl Iterator<Item = Glyph> + 'a + Clone {
         self.run.glyphs_in(self.shaped_clusters.clone())
+    }
+
+    /// Returns an iterator over this glyph run's clusters in logical order.
+    ///
+    /// A [`Run`] spans its whole line item, and a line item is split into one glyph run per
+    /// style. Use this — or [`Self::visual_clusters`] — rather than
+    /// [`Run::clusters`](crate::Run::clusters) to walk the characters of a single glyph run:
+    /// the run's own iterator covers every style of the item, so it would yield each character
+    /// once per glyph run.
+    pub fn clusters(&self) -> impl Iterator<Item = Cluster<'a, B>> + Clone + use<'a, B> {
+        self.run.clusters_in(self.shaped_clusters.clone(), false)
+    }
+
+    /// Returns an iterator over this glyph run's clusters in visual order.
+    ///
+    /// See [`Self::clusters`] for why this scopes to the glyph run.
+    pub fn visual_clusters(&self) -> impl Iterator<Item = Cluster<'a, B>> + Clone + use<'a, B> {
+        self.run.visual_clusters_in(self.shaped_clusters.clone())
     }
 
     /// Returns an iterator over the fully positioned glyphs in the run.

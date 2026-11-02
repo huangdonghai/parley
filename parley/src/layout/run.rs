@@ -213,6 +213,28 @@ impl<'a, B: Brush> Run<'a, B> {
         Clusters::new(*self, !self.is_rtl())
     }
 
+    /// Returns an iterator over the clusters in `shaped_clusters`, in logical order.
+    ///
+    /// `shaped_clusters` indexes into the shaped run this [`Run`] belongs to and must be
+    /// atom-aligned — which is what a [`GlyphRun`](crate::GlyphRun)'s own cluster range is.
+    pub(crate) fn clusters_in(
+        self,
+        shaped_clusters: Range<u32>,
+        rev: bool,
+    ) -> impl Iterator<Item = Cluster<'a, B>> + Clone + use<'a, B> {
+        Clusters::new_in(self, shaped_clusters, rev)
+    }
+
+    /// Returns an iterator over the clusters in `shaped_clusters`, in visual order.
+    ///
+    /// See [`Self::clusters_in`].
+    pub(crate) fn visual_clusters_in(
+        self,
+        shaped_clusters: Range<u32>,
+    ) -> impl Iterator<Item = Cluster<'a, B>> + Clone + use<'a, B> {
+        Clusters::new_in(self, shaped_clusters, self.is_rtl())
+    }
+
     /// The cluster containing the character at `char_index`.
     ///
     /// Returns `None` if `char_index` is not within this run.
@@ -376,7 +398,15 @@ struct Clusters<'a, B: Brush> {
 
 impl<'a, B: Brush> Clusters<'a, B> {
     fn new(run: Run<'a, B>, rev: bool) -> Self {
-        let slice = run.line_slice();
+        Self::from_slice(run, run.line_slice(), rev)
+    }
+
+    /// Iterate the clusters of the run narrowed to `shaped_clusters`.
+    fn new_in(run: Run<'a, B>, shaped_clusters: Range<u32>, rev: bool) -> Self {
+        Self::from_slice(run, run.full_slice().narrow(shaped_clusters), rev)
+    }
+
+    fn from_slice(run: Run<'a, B>, slice: ShapedSlice<'a>, rev: bool) -> Self {
         Self {
             run,
             atoms: if rev {

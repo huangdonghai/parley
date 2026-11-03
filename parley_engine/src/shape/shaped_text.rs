@@ -8,6 +8,7 @@ use core::ops::Range;
 use alloc::vec::Vec;
 use parlance::{BidiLevel, NormalizedCoord};
 use skrifa::MetadataProvider;
+use skrifa::raw::TableProvider as _;
 
 use crate::{
     CharInfo, FontInstance, Glyph,
@@ -203,6 +204,92 @@ impl ShapedText {
     #[inline(always)]
     pub fn runs(&self) -> &[ShapedRun] {
         &self.runs
+    }
+
+    /// Advance upright clusters by their font's vertical advance.
+    ///
+    /// A vertical writing mode advances upright text down the column by the font's vertical
+    /// metrics (CSS Writing Modes 3 5.1.1), which are not the horizontal advances shaping
+    /// produced: a font may set a CJK glyph's `hmtx` advance to less than one em while its
+    /// `vmtx` advance is one em, and upright Latin is an em tall but only half an em wide.
+    /// Line breaking, hit testing and selection all read the cluster advances, so they follow
+    /// whatever this leaves behind.
+    ///
+    /// `text` is the source text; `is_upright` decides per character, and a cluster is upright
+    /// when its first character is. Call this before breaking lines. It is idempotent: the
+    /// advance always comes from the font, so calling it again gives the same result.
+    pub fn set_vertical_advances(&mut self, text: &str, is_upright: impl Fn(char) -> bool) {
+        let runs: Vec<(usize, f32, Range<u32>)> = self
+            .runs
+            .iter()
+            .map(|run| {
+                (
+                    run.font_index,
+                    run.font_size,
+                    run.shaped_clusters_range.clone(),
+                )
+            })
+            .collect();
+        // (font index, glyph id) -> vertical advance in ems. A page repeats a few hundred
+        // glyphs over and over, so read `vmtx` once per glyph rather than once per cluster.
+        let mut ratios: Vec<((usize, u32), f32)> = Vec::new();
+
+        for (run_index, (font_index, font_size, cluster_range)) in runs.iter().enumerate() {
+            let font = &self.fonts[*font_index].font;
+            let Ok(font_ref) = skrifa::raw::FontRef::from_index(font.data.as_ref(), font.index)
+            else {
+                continue;
+            };
+            let upem = font_ref
+                .head()
+                .ok()
+                .map(|head| head.units_per_em() as f32);
+            let vmtx = font_ref.vmtx().ok();
+
+            for cluster_index in cluster_range.clone() {
+                let cluster = self.shaped_clusters[cluster_index as usize];
+                // A cluster without glyphs (a soft hyphen, say) has nothing to advance.
+                if cluster.glyph_len() == 0 {
+                    continue;
+                }
+                let Some(ch) = text
+                    .get(self.characters[cluster.chars_range().start as usize].text_byte_range())
+                    .and_then(|character| character.chars().next())
+                else {
+                    continue;
+                };
+                if !is_upright(ch) {
+                    continue;
+                }
+
+                let glyph_id = if cluster.has_inline_glyph() {
+                    cluster.glyph_offset
+                } else {
+                    self.glyphs[cluster.glyph_offset as usize].id
+                };
+                let key = (*font_index, glyph_id);
+                let ratio = match ratios.iter().find(|(key_candidate, _)| *key_candidate == key) {
+                    Some((_, ratio)) => *ratio,
+                    None => {
+                        // CSS Writing Modes 3 5.1.1: a font without vertical metrics gets a
+                        // synthesized one-em advance.
+                        let ratio = vmtx
+                            .as_ref()
+                            .and_then(|vmtx| vmtx.advance(skrifa::GlyphId::new(glyph_id)))
+                            .zip(upem)
+                            .map(|(advance, upem)| advance as f32 / upem)
+                            .unwrap_or(1.0);
+                        ratios.push((key, ratio));
+                        ratio
+                    }
+                };
+                self.shaped_clusters[cluster_index as usize].advance = ratio * font_size;
+            }
+
+            let cluster_slice = &self.shaped_clusters
+                [cluster_range.start as usize..cluster_range.end as usize];
+            self.runs[run_index].advance = cluster_slice.iter().map(|cluster| cluster.advance).sum();
+        }
     }
 
     /// Escape hatch for `parley` tests that remap style indices to check whether layouts are

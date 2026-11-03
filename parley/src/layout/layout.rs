@@ -58,6 +58,22 @@ impl<B: Brush> Layout<B> {
         self.data.vertical = vertical;
     }
 
+    /// Advance upright clusters by their font's vertical metrics.
+    ///
+    /// A vertical writing mode advances upright text down the column by the font's vertical
+    /// advances, not by the horizontal advances shaping produced, so line breaking, decoration
+    /// placement and hit testing only agree with what is painted when it is told (CSS Writing
+    /// Modes 3 5.1.1). `text` is the layout's source text and `is_upright` decides per
+    /// character: `text-orientation: upright` keeps everything upright, `sideways` rotates
+    /// everything, and the initial `mixed` follows UAX #50.
+    ///
+    /// Call before [`Layout::break_all_lines`] or [`Layout::break_lines`], and only for a
+    /// vertical writing mode — see [`Layout::set_vertical`] for the line box sizing that goes
+    /// with it.
+    pub fn set_vertical_advances(&mut self, text: &str, is_upright: impl Fn(char) -> bool) {
+        self.data.shaped_text.set_vertical_advances(text, is_upright);
+    }
+
     /// Clears the layout while retaining capacity.
     ///
     /// This clears underlying strong references to fonts, which would otherwise

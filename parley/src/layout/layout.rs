@@ -74,6 +74,15 @@ impl<B: Brush> Layout<B> {
         self.data.shaped_text.set_vertical_advances(text, is_upright);
     }
 
+    /// Zero the advance of every cluster that starts inside one of `ranges`.
+    ///
+    /// Ruby annotations and other text that is drawn but does not take room in the line are
+    /// laid out by zeroing their advances before breaking. Like
+    /// [`Layout::set_vertical_advances`], this has to be called before the lines are broken.
+    pub fn clear_advances(&mut self, text: &str, ranges: &[std::ops::Range<usize>]) {
+        self.data.shaped_text.clear_advances(text, ranges);
+    }
+
     /// Clears the layout while retaining capacity.
     ///
     /// This clears underlying strong references to fonts, which would otherwise

@@ -292,6 +292,39 @@ impl ShapedText {
         }
     }
 
+    /// Zero the advance of every cluster that starts inside one of `ranges`.
+    ///
+    /// A ruby annotation is laid out with the base text but must not push it along: clearing
+    /// the annotation's advances before line breaking leaves the base text where it would be
+    /// without the annotation, which is what a page comparing against one without ruby sees.
+    pub fn clear_advances(&mut self, text: &str, ranges: &[std::ops::Range<usize>]) {
+        if ranges.is_empty() {
+            return;
+        }
+        let run_ranges: Vec<std::ops::Range<u32>> = self
+            .runs
+            .iter()
+            .map(|run| run.shaped_clusters_range.clone())
+            .collect();
+
+        for (run_index, cluster_range) in run_ranges.iter().enumerate() {
+            for cluster_index in cluster_range.clone() {
+                let cluster = self.shaped_clusters[cluster_index as usize];
+                let character = &self.characters[cluster.chars_range().start as usize];
+                let byte_range = character.text_byte_range();
+                if text.get(byte_range.clone()).is_none() {
+                    continue;
+                }
+                if ranges.iter().any(|range| range.contains(&byte_range.start)) {
+                    self.shaped_clusters[cluster_index as usize].advance = 0.0;
+                }
+            }
+            let cluster_slice = &self.shaped_clusters
+                [cluster_range.start as usize..cluster_range.end as usize];
+            self.runs[run_index].advance = cluster_slice.iter().map(|cluster| cluster.advance).sum();
+        }
+    }
+
     /// Escape hatch for `parley` tests that remap style indices to check whether layouts are
     /// otherwise identical. This is not for public consumption!
     #[doc(hidden)]

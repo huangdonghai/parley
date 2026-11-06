@@ -297,11 +297,11 @@ impl ShapedText {
     /// A ruby annotation is laid out with the base text but must not push it along: clearing
     /// the annotation's advances before line breaking leaves the base text where it would be
     /// without the annotation, which is what a page comparing against one without ruby sees.
-    pub fn clear_advances(&mut self, text: &str, ranges: &[std::ops::Range<usize>]) {
+    pub fn clear_advances(&mut self, text: &str, ranges: &[Range<usize>]) {
         if ranges.is_empty() {
             return;
         }
-        let run_ranges: Vec<std::ops::Range<u32>> = self
+        let run_ranges: Vec<Range<u32>> = self
             .runs
             .iter()
             .map(|run| run.shaped_clusters_range.clone())

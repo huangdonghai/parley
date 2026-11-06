@@ -190,6 +190,14 @@ impl<'a, B: Brush> Cluster<'a, B> {
         spacing.grapheme_advance(&self.atom, self.grapheme, self.is_rtl())
     }
 
+    /// The cluster's shaped advance before spacing and justification gaps.
+    ///
+    /// [`Self::advance`] includes word spacing, letter spacing and justification;
+    /// this is the underlying shaped advance those gaps are applied to.
+    pub fn shaped_advance(&self) -> f32 {
+        self.grapheme.advance()
+    }
+
     /// Returns `true` if this is a right-to-left cluster.
     pub fn is_rtl(&self) -> bool {
         self.run.is_rtl()

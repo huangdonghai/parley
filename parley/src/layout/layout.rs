@@ -56,6 +56,9 @@ impl<B: Brush> Layout<B> {
     /// [`LayoutData::vertical`](crate::layout::data::LayoutData::vertical).
     pub fn set_vertical(&mut self, vertical: bool) {
         self.data.vertical = vertical;
+        for run in &mut self.data.runs {
+            run.spacing.vertical = vertical;
+        }
     }
 
     /// Resolve upright clusters by their font's vertical metrics.

@@ -15,6 +15,47 @@ use crate::analysis::{Analysis, analyze_text};
 #[derive(Default)]
 pub struct Analyzer {
     pub(crate) bidi: BidiResolver,
+    /// Reused only when Chinese quotation marks need OP/CL line-break classes.
+    pub(crate) line_break_text: alloc::vec::Vec<u8>,
+}
+
+#[cfg(test)]
+mod quotation_tests {
+    use super::*;
+
+    #[test]
+    fn chinese_quotes_use_opening_and_closing_break_rules() {
+        let mut analyzer = Analyzer::new();
+        let mut analysis = Analysis::new();
+        for line_break in [LineBreak::Strict, LineBreak::Normal, LineBreak::Loose] {
+            let text = "国“国”国“";
+            let configs = [(
+                0..text.len(),
+                LineBreakConfig {
+                    language: Some(Language::parse("zh-Hans").unwrap()),
+                    line_break,
+                    ..Default::default()
+                },
+            )];
+            analyzer.analyze(
+                text,
+                &AnalysisOptions {
+                    line_break: &configs,
+                    ..Default::default()
+                },
+                &mut analysis,
+            );
+            let breaks: alloc::vec::Vec<_> = analysis
+                .char_info()
+                .iter()
+                .map(|info| info.is_soft_wrap_opportunity())
+                .collect();
+            assert_eq!(breaks, [false, true, false, false, true, true]);
+        }
+        let text = "国“";
+        analyzer.analyze(text, &AnalysisOptions::default(), &mut analysis);
+        assert!(!analysis.char_info()[1].is_soft_wrap_opportunity());
+    }
 }
 
 impl core::fmt::Debug for Analyzer {

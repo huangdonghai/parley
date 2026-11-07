@@ -94,6 +94,9 @@ pub(crate) struct Spacing {
     /// proportional) punctuation glyphs apart from full-width ones: such glyphs
     /// must not be trimmed again (CSS Text 4 8.5.1).
     pub(crate) font_size: f32,
+    /// Explicit width features override trim only in their corresponding axis.
+    width_features: [bool; 2],
+    pub(crate) vertical: bool,
 }
 
 impl Spacing {
@@ -109,6 +112,24 @@ impl Spacing {
             letter,
             text_spacing_trim,
             font_size,
+            width_features: [false; 2],
+            vertical: false,
+        }
+    }
+
+    pub(crate) const fn with_width_features(mut self, horizontal: bool, vertical: bool) -> Self {
+        self.width_features = [horizontal, vertical];
+        self
+    }
+
+    #[inline(always)]
+    pub(crate) const fn text_spacing_trim(self) -> TextSpacingTrim {
+        if self.width_features[self.vertical as usize] {
+            // Suppress both trimming and restoring space to an explicitly
+            // half-width glyph. `Auto` currently leaves the shaped width alone.
+            TextSpacingTrim::Auto
+        } else {
+            self.text_spacing_trim
         }
     }
 
@@ -117,12 +138,13 @@ impl Spacing {
         self.word == 0.
             && self.letter == 0.
             && matches!(
-                self.text_spacing_trim,
-                TextSpacingTrim::Triplet(
-                    crate::TrimStart::Space,
-                    crate::TrimAdjacent::Space,
-                    crate::TrimEnd::Space
-                )
+                self.text_spacing_trim(),
+                TextSpacingTrim::Auto
+                    | TextSpacingTrim::Triplet(
+                        crate::TrimStart::Space,
+                        crate::TrimAdjacent::Space,
+                        crate::TrimEnd::Space
+                    )
             )
     }
 
@@ -261,7 +283,7 @@ impl EffectiveSpacing {
             gaps.after += self.justification.amount_per_opportunity;
         }
 
-        let trim = self.spacing.text_spacing_trim;
+        let trim = self.spacing.text_spacing_trim();
         if trim.trims_all() {
             let advance = atom.advance();
             if !is_fullwidth(advance, self.spacing.font_size) {
@@ -329,7 +351,7 @@ impl EffectiveSpacing {
 
     /// Whether this atom should be set half-width at its position on the line.
     fn trim_decision(&self, class: SpacingTrimClass, atom: &Atom<'_>) -> bool {
-        let trim = self.spacing.text_spacing_trim;
+        let trim = self.spacing.text_spacing_trim();
         let range = atom.shaped_clusters_range();
         let is_first = self.trim_line.first_cluster == Some(range.start);
         let is_last = self.trim_line.last_cluster == Some(range.end);
@@ -339,7 +361,11 @@ impl EffectiveSpacing {
                     trim.start_trims(self.trim_line.first_line)
                 } else {
                     trim.adjacent_trims()
-                        && (opening_is_adjacent(atom, self.trim_line.prev_trigger))
+                        && opening_is_adjacent(
+                            atom,
+                            self.trim_line.prev_trigger,
+                            self.spacing.font_size,
+                        )
                 }
             }
             SpacingTrimClass::Closing => {
@@ -436,12 +462,15 @@ fn atom_is_ideographic_space(atom: &Atom<'_>) -> bool {
 }
 
 #[inline(always)]
-fn opening_is_adjacent(atom: &Atom<'_>, cross_run_trigger: bool) -> bool {
+fn opening_is_adjacent(atom: &Atom<'_>, cross_run_trigger: bool, font_size: f32) -> bool {
     if let Some(previous) = atom.cursor_before().prev() {
         return matches!(
             atom_trim_class(&previous),
-            SpacingTrimClass::Opening | SpacingTrimClass::Closing | SpacingTrimClass::MiddleDot
-        ) || atom_is_ideographic_space(&previous);
+            SpacingTrimClass::Opening | SpacingTrimClass::MiddleDot
+        ) || (atom_trim_class(&previous) == SpacingTrimClass::Closing
+            && (previous.characters()[0].flags.is_cjk_typographic()
+                || is_fullwidth(previous.advance(), font_size)))
+            || atom_is_ideographic_space(&previous);
     }
     cross_run_trigger
 }

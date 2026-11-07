@@ -341,6 +341,8 @@ impl<'a, B: Brush> Run<'a, B> {
             self.full_slice().narrow(shaped_clusters),
             self.is_rtl(),
             self.line_spacing(),
+            self.line_slice(),
+            self.layout.data.vertical,
         )
     }
 }
@@ -352,6 +354,9 @@ impl<'a, B: Brush> Run<'a, B> {
 pub(crate) struct Glyphs<'a> {
     /// The slice of shaped text narrowed to the shaped clusters being iterated.
     slice: ShapedSlice<'a>,
+    /// Neighbors must survive a glyph-run/style slice being narrowed.
+    context: ShapedSlice<'a>,
+    vertical: bool,
     is_rtl: bool,
     /// The spacing to apply, if any. Without spacing, atoms are not tracked.
     spacing: Option<EffectiveSpacing>,
@@ -370,10 +375,18 @@ pub(crate) struct Glyphs<'a> {
 }
 
 impl<'a> Glyphs<'a> {
-    fn new(slice: ShapedSlice<'a>, is_rtl: bool, spacing: EffectiveSpacing) -> Self {
+    fn new(
+        slice: ShapedSlice<'a>,
+        is_rtl: bool,
+        spacing: EffectiveSpacing,
+        context: ShapedSlice<'a>,
+        vertical: bool,
+    ) -> Self {
         let clusters = slice.shaped_clusters_range();
         Self {
             slice,
+            context,
+            vertical,
             is_rtl,
             spacing: (!spacing.is_zero()).then_some(spacing),
             shaped_clusters: if spacing.is_zero() {
@@ -403,19 +416,14 @@ impl Iterator for Glyphs<'_> {
         loop {
             if let Some(mut glyph) = self.glyphs.next() {
                 if self.spacing.is_some() {
-                    // An upright glyph in a vertical layout advances along the inline
-                    // axis by [`Glyph::vertical_advance`], and the caller applies the
-                    // gaps itself; `advance` is then nothing but the glyph's extent
-                    // across the block axis, which is where the em box gets centred.
-                    // Folding the gaps in there would move that centre: a
-                    // `text-spacing-trim` gap is negative, so fullwidth punctuation
-                    // would sit half a gap off the middle of the column.
-                    let vertical = glyph.vertical_advance != 0.;
-                    if self.atom_glyph == 0 {
+                    // Vertical callers apply the cluster's gaps along the inline
+                    // axis. Preserve shaped offsets and horizontal advances for
+                    // both upright and sideways glyphs: changing these would
+                    // move the column centre or apply the same gap twice.
+                    let vertical = self.vertical;
+                    if self.atom_glyph == 0 && !vertical {
                         glyph.x += self.gaps.before;
-                        if !vertical {
-                            glyph.advance += self.gaps.before;
-                        }
+                        glyph.advance += self.gaps.before;
                     }
                     self.atom_glyph += 1;
                     if self.atom_glyph == self.atom_glyph_count && !vertical {
@@ -444,7 +452,8 @@ impl Iterator for Glyphs<'_> {
                 self.slice.atoms_from(self.shaped_clusters.end).next()
             }?;
             self.shaped_clusters = atom.shaped_clusters_range();
-            self.gaps = spacing.gaps(&atom);
+            let context_atom = self.context.atoms_from(self.shaped_clusters.start).next()?;
+            self.gaps = spacing.gaps(&context_atom);
             self.atom_glyph = 0;
             self.atom_glyph_count = atom
                 .shaped_clusters()
@@ -526,11 +535,17 @@ impl<'a, B: Brush> Iterator for Clusters<'a, B> {
             grapheme.is_atom_start()
         };
         if entered_new_atom {
-            self.atom = if self.rev {
+            let atom = if self.rev {
                 self.atoms.prev()
             } else {
                 self.atoms.next()
             };
+            self.atom = atom.and_then(|atom| {
+                self.run
+                    .line_slice()
+                    .atoms_from(atom.shaped_clusters_range().start)
+                    .next()
+            });
         }
         let atom = self.atom.expect(
             "The first call to `next` should always be an atom edge, so this should always be set at this point.",

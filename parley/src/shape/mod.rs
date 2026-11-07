@@ -272,6 +272,10 @@ pub(crate) fn shape_text<'a, B: Brush>(
                 run_style.letter_spacing,
                 run_style.text_spacing_trim,
                 run_style.font_size,
+            )
+            .with_width_features(
+                overrides_spacing_trim(&style_features[run_style_index as usize], false),
+                overrides_spacing_trim(&style_features[run_style_index as usize], true),
             ),
             char_style_indices,
         );
@@ -281,6 +285,22 @@ pub(crate) fn shape_text<'a, B: Brush>(
     for (box_idx, _inline_box) in inline_box_iter {
         layout.data.push_inline_box(box_idx, box_bidi_levels[box_idx]);
     }
+}
+
+/// Explicit width features take precedence over contextual punctuation spacing.
+fn overrides_spacing_trim(features: &[FontFeature], vertical: bool) -> bool {
+    let tags = if vertical {
+        [*b"vhal", *b"vpal", *b"pwid", *b"hwid"]
+    } else {
+        [*b"halt", *b"palt", *b"pwid", *b"hwid"]
+    };
+    tags.iter().any(|tag| {
+        features
+            .iter()
+            .rev()
+            .find(|feature| feature.tag == Tag::new(tag))
+            .is_some_and(|feature| feature.value != 0)
+    })
 }
 
 /// Language-dependent `text-spacing-trim` class override, if any.
@@ -307,8 +327,6 @@ fn locale_trim_class(ch: char, locale: Option<&parlance::Language>) -> Option<Sp
                 SpacingTrimClass::Closing
             },
         ),
-        // Right quotes do not participate in trim-adjacent collapsing in Japanese.
-        '\u{2019}' | '\u{201D}' if lang == Some("ja") => Some(SpacingTrimClass::Other),
         _ => None,
     }
 }

@@ -721,7 +721,7 @@ impl BreakerState {
         self.line.last_text_cluster = Some(range.end);
         self.line.last_text_class = atom.characters()[0].flags.spacing_trim_class();
         let run_index = data.items[self.item_idx].index;
-        self.line.last_text_trim = data.runs[run_index].spacing.text_spacing_trim;
+        self.line.last_text_trim = data.runs[run_index].spacing.text_spacing_trim();
         self.line.last_text_trigger = matches!(
             self.line.last_text_class,
             SpacingTrimClass::Opening | SpacingTrimClass::Closing | SpacingTrimClass::MiddleDot
@@ -1176,7 +1176,7 @@ impl<'a, B: Brush> BreakLines<'a, B> {
 
                     // Additional spacing to apply between atoms.
                     let spacing = EffectiveSpacing::new(run.data.spacing, Justification::NONE);
-                    let run_trim = run.data.spacing.text_spacing_trim;
+                    let run_trim = run.data.spacing.text_spacing_trim();
                     let is_first_line = self.state.lines == 0
                         || self.state.prev_break_reason == Some(BreakReason::Explicit);
 

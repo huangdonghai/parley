@@ -245,9 +245,9 @@ impl ShapedText {
                 )
             })
             .collect();
-        // (font index, glyph id) -> vertical origin and advance in ems. A page repeats a
+        // (font index, advance features, glyph id) -> vertical origin and advance in ems. A page repeats a
         // few hundred glyphs over and over, so read the font tables once per glyph.
-        let mut metrics_cache: Vec<((usize, u32), Option<(f32, f32)>)> = Vec::new();
+        let mut metrics_cache = hashbrown::HashMap::new();
 
         for (
             run_index,
@@ -325,17 +325,8 @@ impl ShapedText {
                 }
 
                 let mut vertical_for = |glyph_id: u32| {
-                    let key = (*font_index, glyph_id);
-                    let metrics = if let Some((_, metrics)) = metrics_cache
-                        .iter()
-                        .find(|(cached_key, _)| *cached_key == key)
-                    {
-                        *metrics
-                    } else {
-                        let metrics = vertical_metrics(glyph_id);
-                        metrics_cache.push((key, metrics));
-                        metrics
-                    };
+                    let key = (*font_index, *vertical_features, glyph_id);
+                    let metrics = *metrics_cache.entry(key).or_insert_with(|| vertical_metrics(glyph_id));
                     metrics
                         .map(|(origin, advance)| (origin * font_size, advance * font_size))
                         .unwrap_or((fallback_origin, *font_size))
@@ -778,7 +769,7 @@ pub struct ShapedRun {
 
 /// The GPOS features that replace a glyph's vertical advance with a different
 /// one, and so have to be applied on top of `vmtx` when the layout is vertical.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub struct VerticalAdvanceFeatures {
     /// `vhal`: alternate vertical half metrics, which is how a font offers the
     /// half-width form `text-spacing-trim` asks for.
@@ -1092,6 +1083,33 @@ mod tests {
 
     const ROBOTO: &[u8] =
         include_bytes!("../../../parley_dev/assets/fonts/roboto_fonts/Roboto-Regular.ttf");
+
+    #[test]
+    fn vertical_metrics_cache_distinguishes_width_features() {
+        let path = r"D:\_git0\conformance\fonts\noto\cjk\NotoSansCJKjp-Regular-subset-halt.otf";
+        let Ok(bytes) = std::fs::read(path) else { return };
+        let font = FontInstance {
+            font: FontData::new(Blob::new(Arc::new(bytes)), 0),
+            synthesis: Synthesis::default(),
+        };
+        let vert = parlance::FontFeature { tag: parlance::Tag::new(b"vert"), value: 1 };
+        let vhal = parlance::FontFeature { tag: parlance::Tag::new(b"vhal"), value: 1 };
+        let plain = [vert];
+        let half = [vert, vhal];
+        let text = "（（";
+        let mut shaped = ShapedText::new();
+        Shaper::default().shape_text(
+            text, &analyze(text), &[0, 1],
+            [Item { char_end: 1, options: ShapeOptions { font_size: 20., features: &plain, language: None, variations: &[] } },
+             Item { char_end: 2, options: ShapeOptions { font_size: 20., features: &half, language: None, variations: &[] } }],
+            SingleFont(font), &mut shaped,
+        );
+        for _ in 0..2 {
+            shaped.set_vertical_advances(text, parlance::TextOrientation::Upright);
+            let advances: Vec<_> = shaped.shaped_clusters().iter().map(|cluster| cluster.advance).collect();
+            assert_eq!(advances, [20., 10.]);
+        }
+    }
     const NOTO_KUFI_ARABIC: &[u8] =
         include_bytes!("../../../parley_dev/assets/fonts/noto_fonts/NotoKufiArabic-Regular.otf");
     const NOTO_COLOR_EMOJI: &[u8] = include_bytes!(

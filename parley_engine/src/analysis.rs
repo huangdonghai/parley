@@ -162,6 +162,47 @@ fn line_segmenter_impl(opt: LineBreakOptions<'_>) -> LineSegmenterBorrowed<'stat
     LineSegmenter::new_for_non_complex_scripts(opt)
 }
 
+/// UAX #14's QU class may be tailored to OP/CL when the language identifies
+/// opening and closing quotes. Chinese uses these four marks that way.
+/// Only the segmenter's input is tailored: every replacement is three UTF-8
+/// bytes, so boundary indices still refer to the original text. The scratch
+/// allocation is reused and ordinary text needs no copy.
+fn tailor_chinese_quotes<'a>(
+    text: &'a str,
+    configs: &[(Range<usize>, LineBreakConfig)],
+    scratch: &'a mut Vec<u8>,
+) -> &'a str {
+    scratch.clear();
+    for (range, config) in configs {
+        if !config
+            .language
+            .is_some_and(|language| language.language() == "zh")
+        {
+            continue;
+        }
+        let Some(span) = text.get(range.clone()) else {
+            continue;
+        };
+        for (offset, ch) in span.char_indices() {
+            let replacement = match ch {
+                '\u{2018}' | '\u{201C}' => "\u{3008}",
+                '\u{2019}' | '\u{201D}' => "\u{3009}",
+                _ => continue,
+            };
+            if scratch.is_empty() {
+                scratch.extend_from_slice(text.as_bytes());
+            }
+            let start = range.start + offset;
+            scratch[start..start + 3].copy_from_slice(replacement.as_bytes());
+        }
+    }
+    if scratch.is_empty() {
+        text
+    } else {
+        core::str::from_utf8(scratch).expect("three-byte UTF-8 replacements preserve validity")
+    }
+}
+
 /// The line segmenter configuration for a [`LineBreakConfig`].
 ///
 /// Configurations which result in the same segmentation map to the same key.
@@ -548,7 +589,8 @@ pub(crate) fn analyze_text(
     let mut segments = DenseLineBreaks::new(options.line_break, text.len());
     // `text` is non-empty (checked above), so there is always at least one segment.
     let first_segment = segments.next().unwrap();
-    let contiguous_substrings = LineBreakSegmentIter::new(text, segments, first_segment);
+    let break_text = tailor_chinese_quotes(text, options.line_break, &mut analyzer.line_break_text);
+    let contiguous_substrings = LineBreakSegmentIter::new(break_text, segments, first_segment);
 
     let mut global_offset = 0;
     let mut line_boundary_positions: Vec<usize> = Vec::new();

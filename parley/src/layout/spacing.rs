@@ -194,24 +194,32 @@ impl EffectiveSpacing {
         atom.advance() + self.gaps(atom).total()
     }
 
-    /// The total advance of `grapheme`, i.e., the sum of the shaped advance and gaps.
+    /// The gaps owned by `grapheme` at its atom boundaries.
     ///
-    /// This only adds the gap that the grapheme owns, i.e., if that grapheme boundary is also an
-    /// atom boundary.
-    pub(crate) fn grapheme_advance(self, atom: &Atom<'_>, grapheme: Grapheme, is_rtl: bool) -> f32 {
+    /// `grapheme_advance` uses the same ownership rule, so summing the returned
+    /// values over an atom's graphemes gives exactly [`Self::gaps`].
+    pub(crate) fn grapheme_gaps(self, atom: &Atom<'_>, grapheme: Grapheme, is_rtl: bool) -> Gaps {
         let gaps = self.gaps(atom);
-
-        // TODO: perhaps spacing should not be applied if the grapheme `continues_before` /
-        // `continues_after`. The same then should hold true in `gaps` computed for an atom.
         let (owns_before, owns_after) = if is_rtl {
             (grapheme.is_atom_end(), grapheme.is_atom_start())
         } else {
             (grapheme.is_atom_start(), grapheme.is_atom_end())
         };
+        Gaps {
+            before: if owns_before { gaps.before } else { 0. },
+            after: if owns_after { gaps.after } else { 0. },
+        }
+    }
 
-        grapheme.advance()
-            + if owns_before { gaps.before } else { 0. }
-            + if owns_after { gaps.after } else { 0. }
+    /// The total advance of `grapheme`, i.e., the sum of the shaped advance and gaps.
+    ///
+    /// This only adds the gap that the grapheme owns, i.e., if that grapheme boundary is also an
+    /// atom boundary.
+    pub(crate) fn grapheme_advance(self, atom: &Atom<'_>, grapheme: Grapheme, is_rtl: bool) -> f32 {
+        // TODO: perhaps spacing should not be applied if the grapheme `continues_before` /
+        // `continues_after`. The same then should hold true in `gaps` computed for an atom.
+        let gaps = self.grapheme_gaps(atom, grapheme, is_rtl);
+        grapheme.advance() + gaps.total()
     }
 
     /// The total advance of `slice`, i.e., the sum of shaped advances and gaps.

@@ -190,6 +190,30 @@ impl<'a, B: Brush> Cluster<'a, B> {
         spacing.grapheme_advance(&self.atom, self.grapheme, self.is_rtl())
     }
 
+    /// The additional spacing before this grapheme on the inline axis.
+    ///
+    /// This includes word, letter, and justification spacing. The value is in
+    /// visual order: left for horizontal text and top for vertical text. It is
+    /// zero unless this grapheme owns its atom's start edge.
+    pub fn spacing_before(&self) -> f32 {
+        self.run
+            .line_spacing()
+            .grapheme_gaps(&self.atom, self.grapheme, self.is_rtl())
+            .before
+    }
+
+    /// The additional spacing after this grapheme on the inline axis.
+    ///
+    /// This includes word, letter, and justification spacing. The value is in
+    /// visual order: right for horizontal text and bottom for vertical text. It
+    /// is zero unless this grapheme owns its atom's end edge.
+    pub fn spacing_after(&self) -> f32 {
+        self.run
+            .line_spacing()
+            .grapheme_gaps(&self.atom, self.grapheme, self.is_rtl())
+            .after
+    }
+
     /// The cluster's shaped advance before spacing and justification gaps.
     ///
     /// [`Self::advance`] includes word spacing, letter spacing and justification;

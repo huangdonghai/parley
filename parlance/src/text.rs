@@ -73,3 +73,19 @@ pub enum TextWrapMode {
     /// Do not wrap at soft-wrap opportunities.
     NoWrap,
 }
+
+/// How characters are oriented within a vertical line.
+///
+/// This is the text-layout vocabulary for CSS `text-orientation`. The
+/// per-character result for [`TextOrientation::Mixed`] is defined by
+/// [UAX #50](https://www.unicode.org/reports/tr50/).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum TextOrientation {
+    /// Follow UAX #50 per character.
+    #[default]
+    Mixed,
+    /// Keep every character upright.
+    Upright,
+    /// Rotate every character 90 degrees clockwise.
+    Sideways,
+}

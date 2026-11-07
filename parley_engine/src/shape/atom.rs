@@ -148,7 +148,9 @@ impl<'a> ShapedSlice<'a> {
                     id: shaped_cluster.glyph_offset,
                     x: 0.,
                     y: 0.,
-                    advance: shaped_cluster.advance,
+                    advance: shaped_cluster.horizontal_advance,
+                    vertical_origin: shaped_cluster.vertical_origin,
+                    vertical_advance: shaped_cluster.vertical_advance,
                 }),
                 stored: [].iter(),
             }

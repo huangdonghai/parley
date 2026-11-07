@@ -167,8 +167,28 @@ pub struct ShapedCluster {
     // pub glyph_len: u8,
     pub(crate) flags: ShapedClusterFlags,
 
-    /// Advance width for this cluster
+    /// Advance along the current inline axis.
+    ///
+    /// This is horizontal by default and vertical for upright clusters after
+    /// [`ShapedText::set_vertical_advances`](crate::ShapedText::set_vertical_advances).
     pub advance: f32,
+
+    /// Vertical origin of the cluster's first glyph in layout units.
+    ///
+    /// This is zero unless the cluster is upright in a vertical writing mode.
+    pub vertical_origin: f32,
+
+    /// Total vertical advance of the cluster in layout units.
+    ///
+    /// This is zero unless the cluster is upright in a vertical writing mode.
+    pub vertical_advance: f32,
+
+    /// Horizontal advance of an inlined single-glyph cluster.
+    ///
+    /// [`Self::advance`] is the advance along the current inline axis, so it is vertical after
+    /// `ShapedText::set_vertical_advances` for upright clusters. Painting still needs the glyph's
+    /// horizontal extent for the block axis.
+    pub horizontal_advance: f32,
 }
 
 impl ShapedCluster {

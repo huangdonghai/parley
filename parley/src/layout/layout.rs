@@ -1,7 +1,6 @@
 // Copyright 2025 the Parley Authors
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
-use crate::IndentOptions;
 use crate::InlineBox;
 use crate::layout::alignment::align;
 use crate::layout::data::LayoutData;
@@ -10,6 +9,7 @@ use crate::layout::{
     line::Line, line_break::BreakLines,
 };
 use crate::style::Brush;
+use crate::{IndentOptions, TextOrientation};
 
 use core::cmp::Ordering;
 use core::fmt;
@@ -58,20 +58,23 @@ impl<B: Brush> Layout<B> {
         self.data.vertical = vertical;
     }
 
-    /// Advance upright clusters by their font's vertical metrics.
+    /// Resolve upright clusters by their font's vertical metrics.
     ///
     /// A vertical writing mode advances upright text down the column by the font's vertical
     /// advances, not by the horizontal advances shaping produced, so line breaking, decoration
     /// placement and hit testing only agree with what is painted when it is told (CSS Writing
-    /// Modes 3 5.1.1). `text` is the layout's source text and `is_upright` decides per
-    /// character: `text-orientation: upright` keeps everything upright, `sideways` rotates
-    /// everything, and the initial `mixed` follows UAX #50.
+    /// Modes 3 5.1.1). The same pass records every upright glyph's vertical origin for painting.
+    /// `text` is the layout's source text and `orientation` decides which characters are upright:
+    /// `upright` keeps everything upright, `sideways` rotates everything, and the initial
+    /// `mixed` follows UAX #50.
     ///
     /// Call before [`Layout::break_all_lines`] or [`Layout::break_lines`], and only for a
     /// vertical writing mode — see [`Layout::set_vertical`] for the line box sizing that goes
     /// with it.
-    pub fn set_vertical_advances(&mut self, text: &str, is_upright: impl Fn(char) -> bool) {
-        self.data.shaped_text.set_vertical_advances(text, is_upright);
+    pub fn set_vertical_advances(&mut self, text: &str, orientation: TextOrientation) {
+        self.data
+            .shaped_text
+            .set_vertical_advances(text, orientation);
     }
 
     /// Zero the advance of every cluster that starts inside one of `ranges`.

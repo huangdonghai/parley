@@ -6,8 +6,8 @@
 use crate::test_name;
 use crate::util::{ColorBrush, TestEnv, samples};
 use parley::layout::Alignment;
-use parley::style::{LineHeight, StyleProperty};
-use parley::{AlignmentOptions, Layout};
+use parley::style::{FontFamily, LineHeight, StyleProperty};
+use parley::{AlignmentOptions, Layout, TextOrientation};
 
 /// Helper to build a layout with line height applied
 fn build_with_line_height(
@@ -160,6 +160,68 @@ fn style_word_spacing_negative() {
 
         let name = format!("neg_{}", (-spacing) as i32);
         env.with_name(&name).check_layout_snapshot(&layout);
+    }
+}
+
+#[test]
+fn cluster_spacing_gaps_match_advance_delta() {
+    let mut env = TestEnv::new(test_name!(), None);
+    let layout = build_with_letter_spacing(&mut env, "abc", 2.0);
+
+    let mut saw_cluster = false;
+    for line in layout.lines() {
+        for run in line.runs() {
+            for cluster in run.clusters() {
+                let gap = cluster.advance() - cluster.shaped_advance();
+                let split = cluster.spacing_before() + cluster.spacing_after();
+                assert!(
+                    (gap - split).abs() < f32::EPSILON * 8.0,
+                    "cluster spacing must account for the full advance delta"
+                );
+                saw_cluster = true;
+            }
+        }
+    }
+    assert!(saw_cluster);
+}
+
+#[test]
+fn vertical_metrics_are_scaled_per_run() {
+    let mut env = TestEnv::new(test_name!(), None);
+    let text = "AA";
+    let mut builder = env.ranged_builder(text);
+    builder.push_default(StyleProperty::FontFamily(FontFamily::named(
+        "Noto Sans CJK SC",
+    )));
+    builder.push(StyleProperty::FontSize(16.0), 0..1);
+    builder.push(StyleProperty::FontSize(32.0), 1..2);
+    let mut layout = builder.build(text);
+    layout.set_vertical_advances(text, TextOrientation::Upright);
+    layout.break_all_lines(None);
+
+    let mut ratios = Vec::new();
+    for line in layout.lines() {
+        for run in line.runs() {
+            let font_size = run.font_size();
+            for cluster in run.clusters() {
+                let glyph_advance: f32 = cluster
+                    .glyphs()
+                    .map(|glyph| glyph.vertical_advance)
+                    .sum();
+                assert!((cluster.advance() - glyph_advance).abs() < 0.001);
+                for glyph in cluster.glyphs() {
+                    if glyph.vertical_advance > 0.0 {
+                        ratios.push(glyph.vertical_advance / font_size);
+                    }
+                }
+            }
+        }
+    }
+
+    assert!(!ratios.is_empty());
+    let first = ratios[0];
+    for ratio in ratios {
+        assert!((ratio - first).abs() < 0.001);
     }
 }
 

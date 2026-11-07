@@ -6,8 +6,12 @@
 use core::ops::Range;
 
 use alloc::vec::Vec;
-use parlance::{BidiLevel, NormalizedCoord};
-use skrifa::MetadataProvider;
+use icu_properties::{CodePointMapData, props::VerticalOrientation};
+use parlance::{BidiLevel, NormalizedCoord, TextOrientation};
+use skrifa::{
+    GlyphId, MetadataProvider,
+    instance::{LocationRef, Size},
+};
 use skrifa::raw::TableProvider as _;
 
 use crate::{
@@ -96,7 +100,7 @@ impl FontMetrics {
         Some(Self::from_skrifa_metrics(
             &skrifa::metrics::Metrics::new(
                 &font_ref,
-                skrifa::prelude::Size::new(font_size),
+                Size::new(font_size),
                 &location,
             ),
             font_size,
@@ -206,20 +210,23 @@ impl ShapedText {
         &self.runs
     }
 
-    /// Advance upright clusters by their font's vertical advance.
+    /// Resolve upright clusters' vertical origin and advance.
     ///
     /// A vertical writing mode advances upright text down the column by the font's vertical
     /// metrics (CSS Writing Modes 3 5.1.1), which are not the horizontal advances shaping
     /// produced: a font may set a CJK glyph's `hmtx` advance to less than one em while its
     /// `vmtx` advance is one em, and upright Latin is an em tall but only half an em wide.
     /// Line breaking, hit testing and selection all read the cluster advances, so they follow
-    /// whatever this leaves behind.
+    /// whatever this leaves behind. The same pass records every upright glyph's vertical origin
+    /// for painting.
     ///
-    /// `text` is the source text; `is_upright` decides per character, and a cluster is upright
-    /// when its first character is. Call this before breaking lines. It is idempotent: the
-    /// advance always comes from the font, so calling it again gives the same result.
-    pub fn set_vertical_advances(&mut self, text: &str, is_upright: impl Fn(char) -> bool) {
-        let runs: Vec<(usize, f32, Range<u32>)> = self
+    /// `text` is the source text; `orientation` decides which characters are upright, and a
+    /// cluster is upright when its first character is. Call this before breaking lines. It is
+    /// idempotent: the metrics always come from the font, so calling it again gives the same
+    /// result.
+    pub fn set_vertical_advances(&mut self, text: &str, orientation: TextOrientation) {
+        let vertical_orientation = CodePointMapData::<VerticalOrientation>::new();
+        let runs: Vec<(usize, f32, Range<u32>, FontMetrics)> = self
             .runs
             .iter()
             .map(|run| {
@@ -227,24 +234,47 @@ impl ShapedText {
                     run.font_index,
                     run.font_size,
                     run.shaped_clusters_range.clone(),
+                    run.font_metrics,
                 )
             })
             .collect();
-        // (font index, glyph id) -> vertical advance in ems. A page repeats a few hundred
-        // glyphs over and over, so read `vmtx` once per glyph rather than once per cluster.
-        let mut ratios: Vec<((usize, u32), f32)> = Vec::new();
+        // (font index, glyph id) -> vertical origin and advance in ems. A page repeats a
+        // few hundred glyphs over and over, so read the font tables once per glyph.
+        let mut metrics_cache: Vec<((usize, u32), Option<(f32, f32)>)> = Vec::new();
 
-        for (run_index, (font_index, font_size, cluster_range)) in runs.iter().enumerate() {
+        for (run_index, (font_index, font_size, cluster_range, font_metrics)) in
+            runs.iter().enumerate()
+        {
             let font = &self.fonts[*font_index].font;
             let Ok(font_ref) = skrifa::raw::FontRef::from_index(font.data.as_ref(), font.index)
             else {
                 continue;
             };
-            let upem = font_ref
+            let Some(upem) = font_ref
                 .head()
                 .ok()
-                .map(|head| head.units_per_em() as f32);
+                .map(|head| head.units_per_em() as f32)
+            else {
+                continue;
+            };
             let vmtx = font_ref.vmtx().ok();
+            let vorg = font_ref.vorg().ok();
+            let glyph_metrics = font_ref.glyph_metrics(Size::unscaled(), LocationRef::default());
+            let fallback_origin = font_size * font_metrics.ascent
+                / (font_metrics.ascent + font_metrics.descent).max(f32::EPSILON);
+
+            let vertical_metrics = |glyph_id: u32| -> Option<(f32, f32)> {
+                let glyph_id = GlyphId::new(glyph_id);
+                let advance = vmtx.as_ref()?.advance(glyph_id)? as f32 / upem;
+                let origin = if let Some(vorg) = &vorg {
+                    vorg.vertical_origin_y(glyph_id) as f32 / upem
+                } else {
+                    let bounds = glyph_metrics.bounds(glyph_id)?;
+                    let top_side_bearing = vmtx.as_ref()?.side_bearing(glyph_id)?;
+                    (bounds.y_max + top_side_bearing as f32) / upem
+                };
+                Some((origin, advance))
+            };
 
             for cluster_index in cluster_range.clone() {
                 let cluster = self.shaped_clusters[cluster_index as usize];
@@ -258,32 +288,59 @@ impl ShapedText {
                 else {
                     continue;
                 };
-                if !is_upright(ch) {
+                let is_upright = match orientation {
+                    TextOrientation::Sideways => false,
+                    TextOrientation::Upright => true,
+                    TextOrientation::Mixed => {
+                        vertical_orientation.get(ch) != VerticalOrientation::Rotated
+                    }
+                };
+                if !is_upright {
                     continue;
                 }
 
-                let glyph_id = if cluster.has_inline_glyph() {
-                    cluster.glyph_offset
+                let mut vertical_for = |glyph_id: u32| {
+                    let key = (*font_index, glyph_id);
+                    let metrics = if let Some((_, metrics)) = metrics_cache
+                        .iter()
+                        .find(|(cached_key, _)| *cached_key == key)
+                    {
+                        *metrics
+                    } else {
+                        let metrics = vertical_metrics(glyph_id);
+                        metrics_cache.push((key, metrics));
+                        metrics
+                    };
+                    metrics
+                        .map(|(origin, advance)| (origin * font_size, advance * font_size))
+                        .unwrap_or((fallback_origin, *font_size))
+                };
+
+                if cluster.has_inline_glyph() {
+                    let (origin, advance) = vertical_for(cluster.glyph_offset);
+                    let cluster = &mut self.shaped_clusters[cluster_index as usize];
+                    cluster.advance = advance;
+                    cluster.vertical_origin = origin;
+                    cluster.vertical_advance = advance;
                 } else {
-                    self.glyphs[cluster.glyph_offset as usize].id
-                };
-                let key = (*font_index, glyph_id);
-                let ratio = match ratios.iter().find(|(key_candidate, _)| *key_candidate == key) {
-                    Some((_, ratio)) => *ratio,
-                    None => {
-                        // CSS Writing Modes 3 5.1.1: a font without vertical metrics gets a
-                        // synthesized one-em advance.
-                        let ratio = vmtx
-                            .as_ref()
-                            .and_then(|vmtx| vmtx.advance(skrifa::GlyphId::new(glyph_id)))
-                            .zip(upem)
-                            .map(|(advance, upem)| advance as f32 / upem)
-                            .unwrap_or(1.0);
-                        ratios.push((key, ratio));
-                        ratio
+                    let start = cluster.glyph_offset as usize;
+                    let end = start + usize::from(cluster.glyph_len());
+                    let mut advance = 0.;
+                    let mut origin = 0.;
+                    for (glyph_index, glyph) in self.glyphs[start..end].iter_mut().enumerate() {
+                        let (glyph_origin, glyph_advance) = vertical_for(glyph.id);
+                        glyph.vertical_origin = glyph_origin;
+                        glyph.vertical_advance = glyph_advance;
+                        if glyph_index == 0 {
+                            origin = glyph_origin;
+                        }
+                        advance += glyph_advance;
                     }
-                };
-                self.shaped_clusters[cluster_index as usize].advance = ratio * font_size;
+                    let cluster = &mut self.shaped_clusters[cluster_index as usize];
+                    cluster.advance = advance;
+                    cluster.vertical_origin = origin;
+                    cluster.vertical_advance = advance;
+                }
             }
 
             let cluster_slice = &self.shaped_clusters
@@ -428,7 +485,7 @@ impl ShapedText {
                 skrifa::FontRef::from_index(font.font.data.as_ref(), font.font.index).unwrap();
             skrifa::metrics::Metrics::new(
                 &font_ref,
-                skrifa::prelude::Size::new(options.font_size),
+                Size::new(options.font_size),
                 normalized_coords,
             )
         };
@@ -592,6 +649,10 @@ fn process_shaped_clusters<'a>(
     ) {
         let first_character = &characters[cluster.characters_start];
         let is_newline = first_character.whitespace == Whitespace::Newline;
+        let horizontal_advance = cluster
+            .inline_glyph
+            .map(|inline_glyph| inline_glyph.advance)
+            .unwrap_or(0.);
         let (glyph_offset, glyph_len, inline_glyph, advance) = if is_newline {
             // Elide glyphs of newlines.
             (cluster.glyphs_start as u32, 0, false, 0.)
@@ -620,6 +681,9 @@ fn process_shaped_clusters<'a>(
                 ),
             glyph_offset,
             advance,
+            vertical_origin: 0.,
+            vertical_advance: 0.,
+            horizontal_advance,
         });
     }
 
@@ -653,6 +717,8 @@ fn process_shaped_clusters<'a>(
             // Convert from font space (Y-up) to layout space (Y-down)
             y: -(glyph_pos.y_offset as f32) * scale_factor,
             advance: (glyph_pos.x_advance as f32) * scale_factor,
+            vertical_origin: 0.,
+            vertical_advance: 0.,
         };
         if cluster.glyphs == 0 && glyph.x == 0. && glyph.y == 0. {
             // Defer this potential zero-offset, single glyph cluster

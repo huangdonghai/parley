@@ -981,7 +981,10 @@ fn vertical_advance_deltas(
         if !wanted {
             continue;
         }
-        let Ok(feature) = record.feature(gpos.offset_data()) else {
+        // A `FeatureRecord`'s offset is measured from the FeatureList table, not
+        // from the GPOS header, so the wrong base silently resolves the record
+        // to a different feature (and thus the wrong lookups).
+        let Ok(feature) = record.feature(feature_list.offset_data()) else {
             continue;
         };
         for index in feature.lookup_list_indices() {
@@ -1044,7 +1047,48 @@ mod tests {
         shape::CharCluster,
     };
 
-    use super::ShapedText;
+    use super::{ShapedText, VerticalAdvanceFeatures, vertical_advance_deltas};
+
+    /// `vhal` is the only place a font can offer the half-width vertical
+    /// punctuation `text-spacing-trim` asks for, and HarfRust never applies it
+    /// because shaping here never runs in the vertical direction. This checks
+    /// the lookups read by hand against the subset font the text-spacing-trim
+    /// references use.
+    #[test]
+    fn vertical_advance_deltas_cover_the_vertical_forms() {
+        let path = r"D:\_git0\conformance\fonts\noto\cjk\NotoSansCJKjp-Regular-subset-halt.otf";
+        if !std::path::Path::new(path).exists() {
+            std::eprintln!("skipping: the halt-font subset is not present");
+            return;
+        }
+        let bytes = std::fs::read(path).expect("read the halt font");
+        let font = skrifa::raw::FontRef::from_index(&bytes, 0).expect("parse the halt font");
+        let upem = skrifa::raw::TableProvider::head(&font)
+            .expect("head")
+            .units_per_em() as f32;
+        let deltas = vertical_advance_deltas(
+            &font,
+            VerticalAdvanceFeatures {
+                vhal: true,
+                vpal: false,
+            },
+            upem,
+        );
+        // `vhal` in this subset is three single-positioning subtables covering
+        // 19, 7 and 15 vertical forms, each halving the advance. Resolving the
+        // feature to the wrong offsets used to produce a different set of
+        // glyphs entirely, so the count is worth pinning.
+        assert_eq!(
+            deltas.len(),
+            41,
+            "`vhal` covers 19 + 7 + 15 glyphs in this subset, got {}",
+            deltas.len()
+        );
+        assert!(
+            deltas.iter().all(|(_, delta)| *delta == -0.5),
+            "every `vhal` record halves the vertical advance"
+        );
+    }
 
     const ROBOTO: &[u8] =
         include_bytes!("../../../parley_dev/assets/fonts/roboto_fonts/Roboto-Regular.ttf");

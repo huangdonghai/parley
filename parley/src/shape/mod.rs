@@ -229,6 +229,15 @@ pub(crate) fn shape_text<'a, B: Brush>(
         }
     }
 
+    // The class of ambiguous dot and colon punctuation also follows from the
+    // shaped glyph itself: centred ink means middle-dot punctuation even
+    // without a `lang` to consult. That pass runs after the locale one so the
+    // font's own design wins wherever the glyph has outline bounds.
+    layout
+        .data
+        .shaped_text
+        .resolve_trim_classes(text, layout.data.vertical);
+
     let mut inline_box_iter = inline_boxes
         .iter()
         .map(|b| &b.inline_box)

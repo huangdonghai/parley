@@ -404,12 +404,22 @@ impl Iterator for Glyphs<'_> {
         loop {
             if let Some(mut glyph) = self.glyphs.next() {
                 if self.spacing.is_some() {
+                    // An upright glyph in a vertical layout advances along the inline
+                    // axis by [`Glyph::vertical_advance`], and the caller applies the
+                    // gaps itself; `advance` is then nothing but the glyph's extent
+                    // across the block axis, which is where the em box gets centred.
+                    // Folding the gaps in there would move that centre: a
+                    // `text-spacing-trim` gap is negative, so fullwidth punctuation
+                    // would sit half a gap off the middle of the column.
+                    let vertical = glyph.vertical_advance != 0.;
                     if self.atom_glyph == 0 {
                         glyph.x += self.gaps.before;
-                        glyph.advance += self.gaps.before;
+                        if !vertical {
+                            glyph.advance += self.gaps.before;
+                        }
                     }
                     self.atom_glyph += 1;
-                    if self.atom_glyph == self.atom_glyph_count {
+                    if self.atom_glyph == self.atom_glyph_count && !vertical {
                         glyph.advance += self.gaps.after;
                     }
                 }

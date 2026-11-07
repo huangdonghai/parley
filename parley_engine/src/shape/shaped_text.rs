@@ -20,8 +20,8 @@ use crate::{
 };
 
 use super::{
-    Character, CharacterFlags, ShapedCluster, ShapedClusterFlags, Whitespace, atom::ShapedSlice,
-    shaper::ShapeOptions,
+    Character, CharacterFlags, ShapedCluster, ShapedClusterFlags, SpacingTrimClass, Whitespace,
+    atom::ShapedSlice, shaper::ShapeOptions,
 };
 
 /// Metrics that apply to the glyphs of a font.
@@ -349,6 +349,137 @@ impl ShapedText {
         }
     }
 
+    /// Classify the `text-spacing-trim` class of the ambiguous punctuation
+    /// (fullwidth dot and colon punctuation: `U+3001 U+3002 U+FF0C U+FF0E
+    /// U+FF1A U+FF1B`) from where the shaped glyph's ink sits in its advance
+    /// box, per CSS Text 4 §8.5.2: a glyph whose ink is drawn in the middle of
+    /// the box is middle-dot punctuation (a quarter is trimmed from each
+    /// side), while ink that hugs the start of the box (the blank half is at
+    /// the end) is closing punctuation (the trailing half is trimmed). A font
+    /// with centred dot forms therefore gets a quarter trimmed from each side
+    /// even without a `lang` to fall back on, and a font with start-hugging
+    /// forms the closing treatment; no language guesswork is needed for fonts
+    /// whose design already chose.
+    ///
+    /// `text` is the source text; `vertical` selects the metrics the glyph will
+    /// be laid out with (`vmtx`/`VORG` in vertical writing modes, `hmtx`
+    /// otherwise). The shaping features (`vert`) have already been applied, so
+    /// the glyph measured is the one that will be drawn. Clusters whose glyph
+    /// has no outline bounds keep whatever class the character properties (or
+    /// a locale-based override) assigned.
+    ///
+    /// Call this once, after shaping and before breaking lines.
+    pub fn resolve_trim_classes(&mut self, text: &str, vertical: bool) {
+        if !text.chars().any(is_ambiguous_trim_punctuation) {
+            return;
+        }
+        let runs: Vec<(usize, Range<u32>)> = self
+            .runs
+            .iter()
+            .map(|run| (run.font_index, run.shaped_clusters_range.clone()))
+            .collect();
+        // (font index, glyph id) -> centre of the ink measured from the start
+        // of the advance box, as a fraction of that advance.
+        let mut centre_cache: Vec<((usize, u32), Option<f32>)> = Vec::new();
+
+        for (font_index, cluster_range) in runs.iter() {
+            let font = &self.fonts[*font_index].font;
+            let Ok(font_ref) = skrifa::raw::FontRef::from_index(font.data.as_ref(), font.index)
+            else {
+                continue;
+            };
+            let Some(upem) = font_ref.head().ok().map(|head| head.units_per_em() as f32) else {
+                continue;
+            };
+            if upem <= 0.0 {
+                continue;
+            }
+            let vmtx = font_ref.vmtx().ok();
+            let vorg = font_ref.vorg().ok();
+            let glyph_metrics = font_ref.glyph_metrics(Size::unscaled(), LocationRef::default());
+
+            // Centre of the glyph's ink measured from the start of its advance
+            // box, as a fraction of that advance, along the axis it will be
+            // laid out on.
+            let ink_centre = |glyph_id: u32| -> Option<f32> {
+                let glyph_id = GlyphId::new(glyph_id);
+                let bounds = glyph_metrics.bounds(glyph_id)?;
+                if vertical {
+                    let vmtx = vmtx.as_ref()?;
+                    let advance = vmtx.advance(glyph_id)? as f32;
+                    if advance <= 0.0 {
+                        return None;
+                    }
+                    // Distance from the top of the advance box to the glyph
+                    // origin, in font units — the same `VORG`/top-side-bearing
+                    // rule the vertical origin uses in `set_vertical_advances`.
+                    let origin = if let Some(vorg) = &vorg {
+                        vorg.vertical_origin_y(glyph_id) as f32
+                    } else {
+                        let top_side_bearing = vmtx.side_bearing(glyph_id)? as f32;
+                        bounds.y_max + top_side_bearing
+                    };
+                    let centre = origin - (bounds.y_min + bounds.y_max) / 2.0;
+                    Some(centre / advance)
+                } else {
+                    let advance = font_ref.hmtx().ok()?.advance(glyph_id)? as f32;
+                    if advance <= 0.0 {
+                        return None;
+                    }
+                    Some(((bounds.x_min + bounds.x_max) / 2.0) / advance)
+                }
+            };
+
+            for cluster_index in cluster_range.clone() {
+                let cluster = self.shaped_clusters[cluster_index as usize];
+                if cluster.glyph_len() == 0 {
+                    continue;
+                }
+                // The ambiguous punctuation inside this cluster (usually its
+                // first character); the class belongs to the source character.
+                let chars_range = cluster.chars_range();
+                let ambiguous: Vec<u32> = (chars_range.start..chars_range.end)
+                    .filter(|char_index| {
+                        text.get(self.characters[*char_index as usize].text_byte_range())
+                            .and_then(|s| s.chars().next())
+                            .is_some_and(is_ambiguous_trim_punctuation)
+                    })
+                    .collect();
+                if ambiguous.is_empty() {
+                    continue;
+                }
+                let glyph_id = if cluster.has_inline_glyph() {
+                    cluster.glyph_offset
+                } else {
+                    self.glyphs[cluster.glyph_offset as usize].id
+                };
+                let key = (*font_index, glyph_id);
+                let centre = if let Some((_, centre)) =
+                    centre_cache.iter().find(|(cached, _)| *cached == key)
+                {
+                    *centre
+                } else {
+                    let centre = ink_centre(glyph_id);
+                    centre_cache.push((key, centre));
+                    centre
+                };
+                let Some(centre) = centre else {
+                    continue;
+                };
+                let class = if (0.36..=0.64).contains(&centre) {
+                    SpacingTrimClass::MiddleDot
+                } else {
+                    SpacingTrimClass::Closing
+                };
+                for char_index in ambiguous {
+                    self.characters[char_index as usize]
+                        .flags
+                        .set_spacing_trim_class(class);
+                }
+            }
+        }
+    }
+
     /// Zero the advance of every cluster that starts inside one of `ranges`.
     ///
     /// A ruby annotation is laid out with the base text but must not push it along: clearing
@@ -376,9 +507,10 @@ impl ShapedText {
                     self.shaped_clusters[cluster_index as usize].advance = 0.0;
                 }
             }
-            let cluster_slice = &self.shaped_clusters
-                [cluster_range.start as usize..cluster_range.end as usize];
-            self.runs[run_index].advance = cluster_slice.iter().map(|cluster| cluster.advance).sum();
+            let cluster_slice =
+                &self.shaped_clusters[cluster_range.start as usize..cluster_range.end as usize];
+            self.runs[run_index].advance =
+                cluster_slice.iter().map(|cluster| cluster.advance).sum();
         }
     }
 
@@ -741,6 +873,15 @@ fn process_shaped_clusters<'a>(
 
     // Flush the final cluster.
     flush(&mut cluster, characters.len(), characters, shaped_clusters);
+}
+
+/// Whether `ch` is fullwidth dot or colon punctuation, whose `text-spacing-trim`
+/// class is decided by where its ink is drawn rather than by the character.
+fn is_ambiguous_trim_punctuation(ch: char) -> bool {
+    matches!(
+        ch,
+        '\u{3001}' | '\u{3002}' | '\u{FF0C}' | '\u{FF0E}' | '\u{FF1A}' | '\u{FF1B}'
+    )
 }
 
 #[cfg(test)]

@@ -10,8 +10,11 @@ pub struct Glyph {
     pub y: f32,
     /// Horizontal advance in layout units.
     ///
-    /// This remains the glyph's horizontal extent in vertical layout, where
-    /// [`Self::vertical_advance`] is used along the inline axis.
+    /// Spacing and justification gaps are folded into this for text that advances along it, so it
+    /// is the inline advance for horizontal and sideways text. For upright text in a vertical
+    /// layout it stays the glyph's plain horizontal extent instead, because
+    /// [`Self::vertical_advance`] carries the inline axis and the extent is what the block axis is
+    /// centred on.
     pub advance: f32,
     /// Vertical origin in layout units, measured from the inline pen.
     ///

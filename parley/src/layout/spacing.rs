@@ -271,13 +271,7 @@ impl EffectiveSpacing {
                 return gaps;
             }
             match atom.characters()[0].flags.spacing_trim_class() {
-                SpacingTrimClass::Opening => {
-                    if self.trim_line.vertical {
-                        gaps.after -= advance / 2.;
-                    } else {
-                        gaps.before -= advance / 2.;
-                    }
-                }
+                SpacingTrimClass::Opening => gaps.before -= advance / 2.,
                 SpacingTrimClass::Closing => gaps.after -= advance / 2.,
                 SpacingTrimClass::MiddleDot => {
                     gaps.before -= advance / 4.;
@@ -295,16 +289,15 @@ impl EffectiveSpacing {
                 let trimmed = self.trim_decision(class, atom);
                 if trimmed && is_fullwidth(advance, self.spacing.font_size) {
                     match class {
-                        SpacingTrimClass::Opening => {
-                            // Horizontal text anchors the ink to the start
-                            // (left); vertical text keeps it anchored to the
-                            // end (bottom), matching `vhal` glyphs.
-                            if self.trim_line.vertical {
-                                gaps.after -= advance / 2.;
-                            } else {
-                                gaps.before -= advance / 2.;
-                            }
-                        }
+                        // The blank half of opening punctuation is the one
+                        // before the glyph — left in horizontal text, top in
+                        // vertical — so the trim goes on the start side in
+                        // both writing modes. Kerning the start pulls the
+                        // glyph's ink and everything after it back by half an
+                        // em, which is the same geometry as swapping in the
+                        // font's half-width form (`halt`/`vhal`) and shifting
+                        // the glyph, without needing the font to have one.
+                        SpacingTrimClass::Opening => gaps.before -= advance / 2.,
                         SpacingTrimClass::Closing => gaps.after -= advance / 2.,
                         SpacingTrimClass::MiddleDot => {
                             // Middle dots are only trimmed by `trim-all`, never
@@ -322,13 +315,7 @@ impl EffectiveSpacing {
                     // space back. At line edges the glyph is left as given.
                     let extra = self.spacing.font_size - advance;
                     match class {
-                        SpacingTrimClass::Opening => {
-                            if self.trim_line.vertical {
-                                gaps.after += extra;
-                            } else {
-                                gaps.before += extra;
-                            }
-                        }
+                        SpacingTrimClass::Opening => gaps.before += extra,
                         SpacingTrimClass::Closing => gaps.after += extra,
                         SpacingTrimClass::MiddleDot => {
                             gaps.before += extra / 2.;

@@ -141,7 +141,6 @@ impl<'a, B: Brush> Run<'a, B> {
                     first_line,
                     end_trimmed: line.end_trimmed,
                     end_unknown: false,
-                    vertical: self.layout.data.vertical,
                     prev_trigger,
                     next_trigger,
                 },

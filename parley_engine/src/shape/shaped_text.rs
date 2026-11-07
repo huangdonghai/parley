@@ -226,7 +226,13 @@ impl ShapedText {
     /// result.
     pub fn set_vertical_advances(&mut self, text: &str, orientation: TextOrientation) {
         let vertical_orientation = CodePointMapData::<VerticalOrientation>::new();
-        let runs: Vec<(usize, f32, Range<u32>, FontMetrics)> = self
+        let runs: Vec<(
+            usize,
+            f32,
+            Range<u32>,
+            FontMetrics,
+            VerticalAdvanceFeatures,
+        )> = self
             .runs
             .iter()
             .map(|run| {
@@ -235,6 +241,7 @@ impl ShapedText {
                     run.font_size,
                     run.shaped_clusters_range.clone(),
                     run.font_metrics,
+                    run.vertical_features,
                 )
             })
             .collect();
@@ -242,7 +249,10 @@ impl ShapedText {
         // few hundred glyphs over and over, so read the font tables once per glyph.
         let mut metrics_cache: Vec<((usize, u32), Option<(f32, f32)>)> = Vec::new();
 
-        for (run_index, (font_index, font_size, cluster_range, font_metrics)) in
+        for (
+            run_index,
+            (font_index, font_size, cluster_range, font_metrics, vertical_features),
+        ) in
             runs.iter().enumerate()
         {
             let font = &self.fonts[*font_index].font;
@@ -259,13 +269,28 @@ impl ShapedText {
             };
             let vmtx = font_ref.vmtx().ok();
             let vorg = font_ref.vorg().ok();
+            // `vhal`/`vpal` replace the vertical advance, and HarfRust cannot apply
+            // them because it never shapes in the vertical direction here.
+            let vertical_deltas = if vertical_features.any() {
+                vertical_advance_deltas(&font_ref, *vertical_features, upem)
+            } else {
+                Vec::new()
+            };
+            let vertical_delta = |glyph_id: u32| -> f32 {
+                vertical_deltas
+                    .binary_search_by_key(&glyph_id, |(glyph, _)| *glyph)
+                    .map(|found| vertical_deltas[found].1)
+                    .unwrap_or(0.)
+            };
             let glyph_metrics = font_ref.glyph_metrics(Size::unscaled(), LocationRef::default());
             let fallback_origin = font_size * font_metrics.ascent
                 / (font_metrics.ascent + font_metrics.descent).max(f32::EPSILON);
 
             let vertical_metrics = |glyph_id: u32| -> Option<(f32, f32)> {
                 let glyph_id = GlyphId::new(glyph_id);
-                let advance = vmtx.as_ref()?.advance(glyph_id)? as f32 / upem;
+                let advance = (vmtx.as_ref()?.advance(glyph_id)? as f32 / upem
+                    + vertical_delta(glyph_id.to_u32()))
+                .max(0.);
                 let origin = if let Some(vorg) = &vorg {
                     vorg.vertical_origin_y(glyph_id) as f32 / upem
                 } else {
@@ -710,6 +735,7 @@ impl ShapedText {
             bidi_level: segment.bidi_level,
             advance: run_advance,
             font_metrics,
+            vertical_features: VerticalAdvanceFeatures::from_features(options.features),
         });
     }
 }
@@ -740,6 +766,50 @@ pub struct ShapedRun {
     pub advance: f32,
     /// The font metrics of this run.
     pub font_metrics: FontMetrics,
+    /// GPOS features this run asked for that adjust a glyph's *vertical*
+    /// advance.
+    ///
+    /// Shaping always runs in the horizontal direction, so HarfRust never
+    /// applies these: their value records carry a `YAdvance`, which only a
+    /// vertical shaping pass reads. A vertical layout therefore has to fold
+    /// them into the advance it takes from `vmtx` by itself.
+    pub vertical_features: VerticalAdvanceFeatures,
+}
+
+/// The GPOS features that replace a glyph's vertical advance with a different
+/// one, and so have to be applied on top of `vmtx` when the layout is vertical.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct VerticalAdvanceFeatures {
+    /// `vhal`: alternate vertical half metrics, which is how a font offers the
+    /// half-width form `text-spacing-trim` asks for.
+    pub vhal: bool,
+    /// `vpal`: proportional alternate vertical metrics.
+    pub vpal: bool,
+}
+
+impl VerticalAdvanceFeatures {
+    /// Which of the two a style's font features turn on.
+    ///
+    /// `font-feature-settings` lists features in order and the last value for a
+    /// tag wins, which the resolver has already applied by the time the list
+    /// reaches shaping.
+    pub fn from_features(features: &[parlance::FontFeature]) -> Self {
+        let mut on = Self::default();
+        for feature in features {
+            match &feature.tag.to_bytes() {
+                b"vhal" => on.vhal = feature.value != 0,
+                b"vpal" => on.vpal = feature.value != 0,
+                _ => {}
+            }
+        }
+        on
+    }
+
+    /// Whether either feature is on, i.e. whether the font has to be consulted.
+    #[inline(always)]
+    pub fn any(self) -> bool {
+        self.vhal || self.vpal
+    }
 }
 
 /// Processes shaped glyphs from `HarfRust` and converts them into `ShapedCluster` and `Glyph`.
@@ -882,6 +952,82 @@ fn is_ambiguous_trim_punctuation(ch: char) -> bool {
         ch,
         '\u{3001}' | '\u{3002}' | '\u{FF0C}' | '\u{FF0E}' | '\u{FF1A}' | '\u{FF1B}'
     )
+}
+
+/// Read the `vhal`/`vpal` value records that apply to each glyph, in ems.
+///
+/// The result is sorted by glyph id so a caller can binary search it.
+fn vertical_advance_deltas(
+    font_ref: &skrifa::raw::FontRef<'_>,
+    features: VerticalAdvanceFeatures,
+    upem: f32,
+) -> Vec<(u32, f32)> {
+    use skrifa::raw::tables::gpos::{PositionSubtables, SinglePos};
+
+    let Ok(gpos) = font_ref.gpos() else {
+        return Vec::new();
+    };
+    let Ok(lookups) = gpos.lookup_list() else {
+        return Vec::new();
+    };
+    let Ok(feature_list) = gpos.feature_list() else {
+        return Vec::new();
+    };
+    let mut deltas: Vec<(u32, f32)> = Vec::new();
+    for record in feature_list.feature_records() {
+        let tag = record.feature_tag();
+        let wanted = (features.vhal && tag == skrifa::Tag::new(b"vhal"))
+            || (features.vpal && tag == skrifa::Tag::new(b"vpal"));
+        if !wanted {
+            continue;
+        }
+        let Ok(feature) = record.feature(gpos.offset_data()) else {
+            continue;
+        };
+        for index in feature.lookup_list_indices() {
+            let Ok(lookup) = lookups.lookups().get(usize::from(index.get())) else {
+                continue;
+            };
+            let Ok(PositionSubtables::Single(subtables)) = lookup.subtables() else {
+                continue;
+            };
+            for subtable in 0..subtables.len() {
+                let Ok(subtable) = subtables.get(subtable) else {
+                    continue;
+                };
+                match subtable {
+                    SinglePos::Format1(single) => {
+                        let Ok(coverage) = single.coverage() else {
+                            continue;
+                        };
+                        let Some(delta) = single.value_record().y_advance() else {
+                            continue;
+                        };
+                        deltas.extend(
+                            coverage
+                                .iter()
+                                .map(|glyph| (glyph.to_u32(), f32::from(delta) / upem)),
+                        );
+                    }
+                    SinglePos::Format2(single) => {
+                        let Ok(coverage) = single.coverage() else {
+                            continue;
+                        };
+                        for (glyph, value) in coverage.iter().zip(single.value_records().iter()) {
+                            let Ok(value) = value else {
+                                continue;
+                            };
+                            if let Some(delta) = value.y_advance() {
+                                deltas.push((glyph.to_u32(), f32::from(delta) / upem));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    deltas.sort_unstable_by_key(|(glyph, _)| *glyph);
+    deltas
 }
 
 #[cfg(test)]

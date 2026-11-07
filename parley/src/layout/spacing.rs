@@ -166,8 +166,6 @@ pub(crate) struct TrimLineContext {
     pub(crate) end_trimmed: bool,
     /// Whether the end of the line is not yet known (line-breaking measurement).
     pub(crate) end_unknown: bool,
-    /// Whether the inline axis is physical vertical.
-    pub(crate) vertical: bool,
     /// Whether the preceding atom on this line triggers adjacent collapsing.
     pub(crate) prev_trigger: bool,
     /// Whether the following atom on this line triggers adjacent collapsing.
@@ -182,7 +180,6 @@ impl TrimLineContext {
         first_line: false,
         end_trimmed: false,
         end_unknown: false,
-        vertical: false,
         prev_trigger: false,
         next_trigger: false,
     };

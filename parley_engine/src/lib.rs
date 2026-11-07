@@ -122,5 +122,5 @@ pub use analysis::{Analysis, AnalysisDataSources, CharInfo, object_replacement_l
 pub use analyzer::{AnalysisOptions, Analyzer, LineBreakConfig};
 pub use glyph::Glyph;
 pub use shape::atom::{Atom, Atoms, Grapheme, Graphemes, ShapedClusterGlyphs, ShapedSlice};
-pub use shape::shaped_text::{FontMetrics, ShapedRun, ShapedText};
+pub use shape::shaped_text::{FontMetrics, ShapedRun, ShapedText, VerticalAdvanceFeatures};
 pub use shape::shaper::{FontInstance, FontInstanceRef, FontSelector, ShapeOptions, Shaper};

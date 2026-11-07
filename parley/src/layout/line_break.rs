@@ -1255,7 +1255,6 @@ impl<'a, B: Brush> BreakLines<'a, B> {
                             first_line: is_first_line,
                             end_trimmed: false,
                             end_unknown: true,
-                            vertical: self.layout.data.vertical,
                             prev_trigger: self.state.line.last_text_trigger,
                             next_trigger: false,
                         });
@@ -1298,7 +1297,6 @@ impl<'a, B: Brush> BreakLines<'a, B> {
                                     first_line: is_first_line,
                                     end_trimmed: true,
                                     end_unknown: false,
-                                    vertical: self.layout.data.vertical,
                                     prev_trigger: self.state.line.last_text_trigger,
                                     next_trigger: false,
                                 };

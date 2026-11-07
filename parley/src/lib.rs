@@ -128,6 +128,8 @@ mod tests;
 pub use linebender_resource_handle::FontData;
 pub use parlance::BaseDirection;
 pub use parlance::TextOrientation;
+pub use parlance::TextSpacingTrim;
+pub use parlance::{TrimAdjacent, TrimEnd, TrimStart};
 pub use parley_engine::break_overrides::{
     AsciiLineBreakTable, AsciiLineBreakTableBuilder, CHROMIUM_LINE_BREAK_OVERRIDE,
     LineBreakContext, LineBreakOverrideFn,

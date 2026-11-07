@@ -44,7 +44,9 @@ pub use crate::editing::{Cursor, Selection};
 // TODO - Move the following to `style` module and submodules.
 
 use crate::style::Brush;
-use crate::{LineHeight, OverflowWrap, TextWrapMode, VerticalAlign, WhiteSpaceCollapse};
+use crate::{
+    LineHeight, OverflowWrap, TextSpacingTrim, TextWrapMode, VerticalAlign, WhiteSpaceCollapse,
+};
 
 /// Style properties.
 #[derive(Clone, Debug, PartialEq)]
@@ -68,6 +70,8 @@ pub struct Style<B: Brush> {
     pub(crate) text_wrap_mode: TextWrapMode,
     /// Per-cluster whitespace collapsing and hanging behavior.
     pub(crate) white_space_collapse: WhiteSpaceCollapse,
+    /// CSS `text-spacing-trim`.
+    pub(crate) text_spacing_trim: TextSpacingTrim,
     /// The locale of the text, if any.
     ///
     /// This is useful for consumers exposing the text to assistive technologies,

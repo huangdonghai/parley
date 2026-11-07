@@ -20,6 +20,7 @@ use crate::{FontContext, FontData, Spacing};
 
 use fontique::{self, Query, QueryFamily, QueryFont};
 use parlance::{GenericFamily, Tag};
+use parley_engine::shape::SpacingTrimClass;
 
 /// If these font features are passed to the shaper, optional ligatures are not applied.
 ///
@@ -205,6 +206,29 @@ pub(crate) fn shape_text<'a, B: Brush>(
         &mut layout.data.shaped_text,
     );
 
+    // Resolve language-dependent `text-spacing-trim` classes for ambiguous
+    // characters (colon/dot punctuation and quotes), whose classification
+    // cannot be decided from the character alone (CSS Text 4 8.5.3).
+    {
+        let characters = layout.data.shaped_text.characters_mut();
+        if characters.len() == char_style_indices.len() {
+            for ((char_index, ch), (character, style_index)) in text
+                .chars()
+                .enumerate()
+                .zip(characters.iter_mut().zip(char_style_indices.iter()))
+            {
+                let _ = char_index;
+                let Some(class) = locale_trim_class(
+                    ch,
+                    styles[usize::from(*style_index)].locale.as_ref(),
+                ) else {
+                    continue;
+                };
+                character.flags.set_spacing_trim_class(class);
+            }
+        }
+    }
+
     let mut inline_box_iter = inline_boxes
         .iter()
         .map(|b| &b.inline_box)
@@ -234,7 +258,12 @@ pub(crate) fn shape_text<'a, B: Brush>(
             // we probably shouldn't itemize on them; we should just ensure we don't ligate if
             // they're non-zero).
             run_style,
-            Spacing::new(run_style.word_spacing, run_style.letter_spacing),
+            Spacing::new(
+                run_style.word_spacing,
+                run_style.letter_spacing,
+                run_style.text_spacing_trim,
+                run_style.font_size,
+            ),
             char_style_indices,
         );
     }
@@ -242,6 +271,36 @@ pub(crate) fn shape_text<'a, B: Brush>(
     // Process any remaining inline boxes whose index is greater than the length of the text.
     for (box_idx, _inline_box) in inline_box_iter {
         layout.data.push_inline_box(box_idx, box_bidi_levels[box_idx]);
+    }
+}
+
+/// Language-dependent `text-spacing-trim` class override, if any.
+///
+/// Returns `None` when the character's default classification applies.
+fn locale_trim_class(ch: char, locale: Option<&parlance::Language>) -> Option<SpacingTrimClass> {
+    let lang = locale.map(|l| l.language());
+    let is_hant = locale.is_some_and(|l| l.language() == "zh" && l.script() == Some("Hant"));
+    match ch {
+        // Fullwidth colon/semicolon: closing for Simplified Chinese,
+        // middle-dot for Traditional Chinese, Korean, and Japanese.
+        '\u{FF1A}' | '\u{FF1B}' => Some(
+            if lang == Some("ja") || lang == Some("ko") || is_hant {
+                SpacingTrimClass::MiddleDot
+            } else {
+                SpacingTrimClass::Closing
+            },
+        ),
+        // Fullwidth dot punctuation: closing except for Traditional Chinese.
+        '\u{3001}' | '\u{3002}' | '\u{FF0C}' | '\u{FF0E}' => Some(
+            if is_hant {
+                SpacingTrimClass::MiddleDot
+            } else {
+                SpacingTrimClass::Closing
+            },
+        ),
+        // Right quotes do not participate in trim-adjacent collapsing in Japanese.
+        '\u{2019}' | '\u{201D}' if lang == Some("ja") => Some(SpacingTrimClass::Other),
+        _ => None,
     }
 }
 

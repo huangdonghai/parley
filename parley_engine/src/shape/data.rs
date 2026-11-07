@@ -6,6 +6,8 @@
 use core::ops::Range;
 
 use crate::shape::Whitespace;
+use icu_properties::props::GeneralCategory;
+use parley_data::Properties;
 
 /// Data for a single character of the source text.
 ///
@@ -275,6 +277,21 @@ impl ShapedCluster {
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub struct CharacterFlags(u8);
 
+/// The punctuation classes used by `text-spacing-trim`.
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
+#[repr(u8)]
+pub enum SpacingTrimClass {
+    /// Not CJK punctuation controlled by `text-spacing-trim`.
+    #[default]
+    Other = 0,
+    /// Fullwidth opening punctuation, whose leading half is blank.
+    Opening = 1,
+    /// Fullwidth closing punctuation, whose trailing half is blank.
+    Closing = 2,
+    /// Fullwidth middle-dot punctuation, whose blank space is centered.
+    MiddleDot = 3,
+}
+
 impl CharacterFlags {
     /// Bits 0..2: the UTF-8 length of the source character minus one.
     ///
@@ -293,6 +310,8 @@ impl CharacterFlags {
     /// opportunity, which is how CJK text — which does not separate words with spaces — gets
     /// justified (`text-align: justify`).
     const CJK_TYPOGRAPHIC: u8 = 1 << 5;
+    const SPACING_TRIM_SHIFT: u8 = 6;
+    const SPACING_TRIM_MASK: u8 = 0b11 << Self::SPACING_TRIM_SHIFT;
 
     #[inline(always)]
     pub fn new(source_char: char, is_word_boundary: bool, is_soft_wrap_opportunity: bool) -> Self {
@@ -320,7 +339,8 @@ impl CharacterFlags {
                     Self::CJK_TYPOGRAPHIC
                 } else {
                     0
-                },
+                }
+                | ((spacing_trim_class(source_char) as u8) << Self::SPACING_TRIM_SHIFT),
         )
     }
 
@@ -351,6 +371,26 @@ impl CharacterFlags {
     #[inline(always)]
     pub fn is_cjk_typographic(self) -> bool {
         self.0 & Self::CJK_TYPOGRAPHIC != 0
+    }
+
+    /// The `text-spacing-trim` class for this character.
+    #[inline(always)]
+    pub fn spacing_trim_class(self) -> SpacingTrimClass {
+        match (self.0 & Self::SPACING_TRIM_MASK) >> Self::SPACING_TRIM_SHIFT {
+            1 => SpacingTrimClass::Opening,
+            2 => SpacingTrimClass::Closing,
+            3 => SpacingTrimClass::MiddleDot,
+            _ => SpacingTrimClass::Other,
+        }
+    }
+
+    /// Override this character's `text-spacing-trim` class.
+    ///
+    /// This is for language-dependent classification (colon/dot punctuation)
+    /// which cannot be decided from the character alone.
+    #[inline(always)]
+    pub fn set_spacing_trim_class(&mut self, class: SpacingTrimClass) {
+        self.0 = (self.0 & !Self::SPACING_TRIM_MASK) | ((class as u8) << Self::SPACING_TRIM_SHIFT);
     }
 
     /// Returns the number of bytes the source character would need if encoded in UTF-8.
@@ -387,6 +427,41 @@ fn is_cjk_typographic_char(ch: char) -> bool {
         | 0xFF00..=0xFFEF // Halfwidth and Fullwidth Forms
         | 0x20000..=0x2FA1F // CJK Unified Ideographs Extensions B..F and Compatibility Supplement
     )
+}
+
+/// Classify punctuation for `text-spacing-trim`.
+///
+/// The default classification of the ambiguous fullwidth colon/dot characters is
+/// closing punctuation; callers with language information can refine the
+/// ambiguous cases later. The common punctuation paths avoid a Unicode lookup.
+fn spacing_trim_class(ch: char) -> SpacingTrimClass {
+    match ch {
+        '\u{2018}' | '\u{201C}' => SpacingTrimClass::Opening,
+        '\u{2019}' | '\u{201D}' => SpacingTrimClass::Closing,
+        '\u{00B7}' | '\u{2027}' | '\u{30FB}' => SpacingTrimClass::MiddleDot,
+        // Fullwidth colon/semicolon and dot punctuation. The default (language-
+        // independent) classification follows the informative table for
+        // Simplified Chinese: closing punctuation.
+        '\u{3001}' | '\u{3002}' | '\u{FF0C}' | '\u{FF0E}' | '\u{FF1A}' | '\u{FF1B}' => {
+            SpacingTrimClass::Closing
+        }
+        // Narrow (ASCII) brackets are never trim targets (their advances are
+        // well below fullwidth, so the layout guard skips them), but they do
+        // count as Ps/Pe neighbors for adjacent-pair collapsing.
+        '(' | '[' | '{' => SpacingTrimClass::Opening,
+        ')' | ']' | '}' => SpacingTrimClass::Closing,
+        _ => {
+            let fullwidth = matches!(ch as u32, 0x3000..=0x303F | 0xFF00..=0xFFEF);
+            if !fullwidth {
+                return SpacingTrimClass::Other;
+            }
+            match Properties::get(ch).general_category() {
+                GeneralCategory::OpenPunctuation => SpacingTrimClass::Opening,
+                GeneralCategory::ClosePunctuation => SpacingTrimClass::Closing,
+                _ => SpacingTrimClass::Other,
+            }
+        }
+    }
 }
 
 #[cfg(test)]

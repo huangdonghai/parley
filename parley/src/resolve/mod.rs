@@ -18,7 +18,7 @@ use crate::font::FontContext;
 use crate::style::TextStyle;
 use crate::util::nearly_eq;
 use crate::{LineBreak, LineHeight, OverflowWrap, VerticalAlign, layout};
-use crate::{TextWrapMode, WhiteSpaceCollapse, WordBreak};
+use crate::{TextSpacingTrim, TextWrapMode, WhiteSpaceCollapse, WordBreak};
 use core::borrow::Borrow;
 use core::ops::Range;
 use fontique::FamilyId;
@@ -164,6 +164,7 @@ impl ResolveContext {
             StyleProperty::VerticalAlign(value) => VerticalAlign(value.scale(scale)),
             StyleProperty::WordSpacing(value) => WordSpacing(*value * scale),
             StyleProperty::LetterSpacing(value) => LetterSpacing(*value * scale),
+            StyleProperty::TextSpacingTrim(value) => TextSpacingTrim(*value),
             StyleProperty::WordBreak(value) => WordBreak(*value),
             StyleProperty::LineBreak(value) => LineBreak(*value),
             StyleProperty::OverflowWrap(value) => OverflowWrap(*value),
@@ -205,6 +206,7 @@ impl ResolveContext {
             vertical_align: raw_style.vertical_align.scale(scale),
             word_spacing: raw_style.word_spacing * scale,
             letter_spacing: raw_style.letter_spacing * scale,
+            text_spacing_trim: raw_style.text_spacing_trim,
             word_break: raw_style.word_break,
             line_break: raw_style.line_break,
             overflow_wrap: raw_style.overflow_wrap,
@@ -390,6 +392,8 @@ pub(crate) enum ResolvedProperty<B: Brush> {
     WordSpacing(f32),
     /// Extra spacing between letters.
     LetterSpacing(f32),
+    /// CSS `text-spacing-trim`.
+    TextSpacingTrim(TextSpacingTrim),
     /// Control over where words can wrap.
     WordBreak(WordBreak),
     /// Strictness of line-breaking rules.
@@ -438,6 +442,8 @@ pub(crate) struct ResolvedStyle<B: Brush> {
     pub(crate) word_spacing: f32,
     /// Extra spacing between letters.
     pub(crate) letter_spacing: f32,
+    /// CSS `text-spacing-trim`.
+    pub(crate) text_spacing_trim: TextSpacingTrim,
     /// Control over where words can wrap.
     pub(crate) word_break: WordBreak,
     /// Strictness of line-breaking rules.
@@ -476,6 +482,7 @@ impl<B: Brush> ResolvedStyle<B> {
             VerticalAlign(value) => self.vertical_align = value,
             WordSpacing(value) => self.word_spacing = value,
             LetterSpacing(value) => self.letter_spacing = value,
+            TextSpacingTrim(value) => self.text_spacing_trim = value,
             WordBreak(value) => self.word_break = value,
             LineBreak(value) => self.line_break = value,
             OverflowWrap(value) => self.overflow_wrap = value,
@@ -508,6 +515,7 @@ impl<B: Brush> ResolvedStyle<B> {
             VerticalAlign(value) => self.vertical_align.nearly_eq(*value),
             WordSpacing(value) => nearly_eq(self.word_spacing, *value),
             LetterSpacing(value) => nearly_eq(self.letter_spacing, *value),
+            TextSpacingTrim(value) => self.text_spacing_trim == *value,
             WordBreak(value) => self.word_break == *value,
             LineBreak(value) => self.line_break == *value,
             OverflowWrap(value) => self.overflow_wrap == *value,
@@ -527,6 +535,7 @@ impl<B: Brush> ResolvedStyle<B> {
             overflow_wrap: self.overflow_wrap,
             text_wrap_mode: self.text_wrap_mode,
             white_space_collapse: self.white_space_collapse,
+            text_spacing_trim: self.text_spacing_trim,
             locale: self.locale,
         }
     }

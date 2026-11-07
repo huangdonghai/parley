@@ -91,6 +91,12 @@ pub(crate) struct LineData {
     pub(crate) break_reason: BreakReason,
     /// Maximum advance for the line.
     pub(crate) max_advance: f32,
+    /// Shaped-cluster index where the line's first text atom starts, if any.
+    pub(crate) first_text_cluster: Option<u32>,
+    /// Shaped-cluster index where the line's last text atom ends (exclusive), if any.
+    pub(crate) last_text_cluster: Option<u32>,
+    /// Whether the line's last closing atom was trimmed for `text-spacing-trim`'s end position.
+    pub(crate) end_trimmed: bool,
     /// The number of justification opportunities on the line.
     pub(crate) num_justification_opportunities: u32,
     pub(crate) justification: Justification,

@@ -406,6 +406,12 @@ impl ShapedText {
         &self.characters
     }
 
+    /// The character data of the text, in logical order (mutable view).
+    #[inline(always)]
+    pub fn characters_mut(&mut self) -> &mut [Character] {
+        &mut self.characters
+    }
+
     /// The shaped clusters.
     ///
     /// [`ShapedRun::shaped_clusters_range`] indexes into this.

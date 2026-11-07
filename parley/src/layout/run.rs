@@ -3,9 +3,9 @@
 
 use crate::FontData;
 use crate::layout::cluster::Cluster;
-use crate::layout::data::{LineItemData, RunData};
+use crate::layout::data::{BreakReason, LineItemData, RunData};
 use crate::layout::layout::Layout;
-use crate::layout::spacing::{EffectiveSpacing, Gaps, Justification};
+use crate::layout::spacing::{EffectiveSpacing, Gaps, Justification, TrimLineContext};
 use crate::style::Brush;
 
 use core::ops::Range;
@@ -127,12 +127,77 @@ impl<'a, B: Brush> Run<'a, B> {
 
     #[inline]
     pub(crate) fn line_spacing(&self) -> EffectiveSpacing {
-        let justification = if self.line_data.is_some() {
-            self.layout.data.lines[self.line_index as usize].justification
+        let (justification, trim_line) = if self.line_data.is_some() {
+            let line = &self.layout.data.lines[self.line_index as usize];
+            let first_line = self.line_index == 0
+                || self.layout.data.lines[self.line_index as usize - 1].break_reason
+                    == BreakReason::Explicit;
+            let (prev_trigger, next_trigger) = self.adjacent_triggers(line);
+            (
+                line.justification,
+                TrimLineContext {
+                    first_cluster: line.first_text_cluster,
+                    last_cluster: line.last_text_cluster,
+                    first_line,
+                    end_trimmed: line.end_trimmed,
+                    end_unknown: false,
+                    vertical: self.layout.data.vertical,
+                    prev_trigger,
+                    next_trigger,
+                },
+            )
         } else {
-            Justification::NONE
+            (Justification::NONE, TrimLineContext::NONE)
         };
-        EffectiveSpacing::new(self.data.spacing, justification)
+        EffectiveSpacing::new(self.data.spacing, justification).with_trim_line(trim_line)
+    }
+
+    /// Whether the neighboring text runs on this line trigger adjacent collapsing.
+    fn adjacent_triggers(&self, line: &crate::layout::LineData) -> (bool, bool) {
+        use crate::layout::LayoutItemKind;
+        use parley_engine::shape::{SpacingTrimClass, Whitespace};
+
+        let trigger = |atom: &Atom<'_>| {
+            matches!(
+                atom.characters()[0].flags.spacing_trim_class(),
+                SpacingTrimClass::Opening | SpacingTrimClass::Closing | SpacingTrimClass::MiddleDot
+            ) || atom.characters()[0].whitespace == Whitespace::IdeographicSpace
+        };
+        let items = &self.layout.data.line_items[line.item_range.clone()];
+        let Some(position) = items.iter().position(|item| {
+            item.kind == LayoutItemKind::TextRun
+                && item.index == self.shaped_text_run_index as usize
+        }) else {
+            return (false, false);
+        };
+        let prev = items[..position]
+            .iter()
+            .rev()
+            .find(|item| item.kind == LayoutItemKind::TextRun)
+            .and_then(|item| {
+                self.layout
+                    .data
+                    .shaped_text
+                    .run_slice(item.index as u32)
+                    .narrow(item.shaped_cluster_range.clone())
+                    .atoms_end()
+                    .prev()
+            })
+            .is_some_and(|atom| trigger(&atom));
+        let next = items[position + 1..]
+            .iter()
+            .find(|item| item.kind == LayoutItemKind::TextRun)
+            .and_then(|item| {
+                self.layout
+                    .data
+                    .shaped_text
+                    .run_slice(item.index as u32)
+                    .narrow(item.shaped_cluster_range.clone())
+                    .atoms_start()
+                    .next()
+            })
+            .is_some_and(|atom| trigger(&atom));
+        (prev, next)
     }
 
     /// Returns the advance for the run.

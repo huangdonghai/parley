@@ -7,7 +7,7 @@ use crate::test_name;
 use crate::util::{ColorBrush, TestEnv, samples};
 use parley::layout::Alignment;
 use parley::style::{FontFamily, LineHeight, StyleProperty};
-use parley::{AlignmentOptions, Layout, TextOrientation};
+use parley::{AlignmentOptions, Layout, TextOrientation, TextSpacingTrim};
 
 /// Helper to build a layout with line height applied
 fn build_with_line_height(
@@ -222,6 +222,91 @@ fn vertical_metrics_are_scaled_per_run() {
     let first = ratios[0];
     for ratio in ratios {
         assert!((ratio - first).abs() < 0.001);
+    }
+}
+
+fn build_trimmed(env: &mut TestEnv, text: &str, trim: parley::TextSpacingTrim) -> Layout<ColorBrush> {
+    let mut builder = env.ranged_builder(text);
+    builder.push_default(StyleProperty::FontFamily(FontFamily::named(
+        "Noto Sans CJK SC",
+    )));
+    builder.push_default(StyleProperty::TextSpacingTrim(trim));
+    let mut layout = builder.build(text);
+    layout.break_all_lines(None);
+    layout
+}
+
+/// The `spacing_after` + `shaped_advance` deltas per cluster, split by side.
+fn spacing_sides(layout: &Layout<ColorBrush>) -> Vec<(f32, f32)> {
+    let mut out = Vec::new();
+    for line in layout.lines() {
+        for run in line.runs() {
+            for cluster in run.clusters() {
+                out.push((cluster.spacing_before(), cluster.spacing_after()));
+            }
+        }
+    }
+    out
+}
+
+#[test]
+fn text_spacing_trim_all_trims_every_punctuation_side() {
+    let mut env = TestEnv::new(test_name!(), None);
+    let layout = build_trimmed(&mut env, "国（国）国", TextSpacingTrim::TrimAll);
+    let sides = spacing_sides(&layout);
+    assert_eq!(sides.len(), 5);
+    assert!(sides[1].0 < 0., "horizontal opening trims its leading half: {sides:?}");
+    assert_eq!(sides[1].1, 0.);
+    assert!(sides[3].1 < 0., "closing trims its trailing half: {sides:?}");
+}
+
+#[test]
+fn text_spacing_trim_normal_collapses_only_adjacent_pairs() {
+    let mut env = TestEnv::new(test_name!(), None);
+    // ）（ adjacent: both collapse under the default policy.
+    let layout = build_trimmed(&mut env, "国）（国", TextSpacingTrim::normal());
+    let sides = spacing_sides(&layout);
+    assert_eq!(sides[1], (0., 0.), "closing before opening stays full: {sides:?}");
+    assert!(sides[2].0 < 0., "opening after closing collapses: {sides:?}");
+    // Mid-line, non-adjacent punctuation stays spaced.
+    let layout = build_trimmed(&mut env, "国（国", TextSpacingTrim::normal());
+    let sides = spacing_sides(&layout);
+    assert_eq!(sides, vec![(0., 0.), (0., 0.), (0., 0.)]);
+}
+
+#[test]
+fn text_spacing_trim_start_and_end_policies() {
+    let mut env = TestEnv::new(test_name!(), None);
+    // `normal` (space-start): line-start opening is not trimmed.
+    let layout = build_trimmed(&mut env, "（国", TextSpacingTrim::normal());
+    let sides = spacing_sides(&layout);
+    assert_eq!(sides[0].0, 0., "space-start must not trim: {sides:?}");
+    // `trim-start` policy trims the line-start opening.
+    let trim_start = TextSpacingTrim::new(
+        parley::TrimStart::Trim,
+        parley::TrimAdjacent::Trim,
+        parley::TrimEnd::Allow,
+    );
+    let layout = build_trimmed(&mut env, "（国", trim_start);
+    let sides = spacing_sides(&layout);
+    assert!(sides[0].0 < 0., "trim-start must trim: {sides:?}");
+    // `trim-end` trims the line-final closing punctuation.
+    let trim_end = TextSpacingTrim::new(
+        parley::TrimStart::Space,
+        parley::TrimAdjacent::Trim,
+        parley::TrimEnd::Trim,
+    );
+    let layout = build_trimmed(&mut env, "国）", trim_end);
+    let sides = spacing_sides(&layout);
+    assert!(sides[1].1 < 0., "trim-end must trim: {sides:?}");
+}
+
+#[test]
+fn text_spacing_trim_space_all_never_trims() {
+    let mut env = TestEnv::new(test_name!(), None);
+    let layout = build_trimmed(&mut env, "国（（）国", TextSpacingTrim::space_all());
+    for (before, after) in spacing_sides(&layout) {
+        assert_eq!((before, after), (0., 0.));
     }
 }
 

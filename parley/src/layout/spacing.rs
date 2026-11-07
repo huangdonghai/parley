@@ -3,7 +3,12 @@
 
 //! Additional advance applied on top of shaped advance.
 
-use parley_engine::{Atom, Grapheme, ShapedSlice, shape::Whitespace};
+use parley_engine::{
+    Atom, Grapheme, ShapedSlice,
+    shape::{SpacingTrimClass, Whitespace},
+};
+
+use crate::TextSpacingTrim;
 
 /// Whether the whitespace is a word separator.
 ///
@@ -83,17 +88,42 @@ pub(crate) struct Spacing {
     ///
     /// [css-letter-spacing]: https://www.w3.org/TR/css-text-4/#letter-spacing-property
     pub(crate) letter: f32,
+    /// CSS `text-spacing-trim`.
+    pub(crate) text_spacing_trim: TextSpacingTrim,
+    /// The run's font size, used to tell half-width (already trimmed or
+    /// proportional) punctuation glyphs apart from full-width ones: such glyphs
+    /// must not be trimmed again (CSS Text 4 8.5.1).
+    pub(crate) font_size: f32,
 }
 
 impl Spacing {
     #[inline(always)]
-    pub(crate) const fn new(word: f32, letter: f32) -> Self {
-        Self { word, letter }
+    pub(crate) const fn new(
+        word: f32,
+        letter: f32,
+        text_spacing_trim: TextSpacingTrim,
+        font_size: f32,
+    ) -> Self {
+        Self {
+            word,
+            letter,
+            text_spacing_trim,
+            font_size,
+        }
     }
 
     #[inline(always)]
     pub(crate) const fn is_zero(self) -> bool {
-        self.word == 0. && self.letter == 0.
+        self.word == 0.
+            && self.letter == 0.
+            && matches!(
+                self.text_spacing_trim,
+                TextSpacingTrim::Triplet(
+                    crate::TrimStart::Space,
+                    crate::TrimAdjacent::Space,
+                    crate::TrimEnd::Space
+                )
+            )
     }
 
     /// The gaps around an atom whose first character has the given whitespace class.
@@ -116,6 +146,46 @@ impl Spacing {
 
         gaps
     }
+}
+
+/// Line-position information for `text-spacing-trim`.
+///
+/// This is `Copy` so it can live in [`EffectiveSpacing`] without allocation.
+/// `first_cluster`/`last_cluster` are shaped-cluster indices of the first and
+/// last text atoms on the line; `None` means "not at that edge" (or, during
+/// line breaking measurement for the last atom, "not yet known").
+#[derive(Copy, Clone, Debug)]
+pub(crate) struct TrimLineContext {
+    /// Shaped-cluster index where the line's first text atom starts.
+    pub(crate) first_cluster: Option<u32>,
+    /// Shaped-cluster index where the line's last text atom ends (exclusive).
+    pub(crate) last_cluster: Option<u32>,
+    /// Whether this line is the first line of the block or follows a forced break.
+    pub(crate) first_line: bool,
+    /// Whether the line's last closing atom was trimmed to fit (`allow-end`).
+    pub(crate) end_trimmed: bool,
+    /// Whether the end of the line is not yet known (line-breaking measurement).
+    pub(crate) end_unknown: bool,
+    /// Whether the inline axis is physical vertical.
+    pub(crate) vertical: bool,
+    /// Whether the preceding atom on this line triggers adjacent collapsing.
+    pub(crate) prev_trigger: bool,
+    /// Whether the following atom on this line triggers adjacent collapsing.
+    pub(crate) next_trigger: bool,
+}
+
+impl TrimLineContext {
+    /// No line information: mid-line behavior with slice neighbors.
+    pub(crate) const NONE: Self = Self {
+        first_cluster: None,
+        last_cluster: None,
+        first_line: false,
+        end_trimmed: false,
+        end_unknown: false,
+        vertical: false,
+        prev_trigger: false,
+        next_trigger: false,
+    };
 }
 
 /// Justification to apply to a single line.
@@ -150,6 +220,7 @@ impl Default for Justification {
 pub(crate) struct EffectiveSpacing {
     spacing: Spacing,
     justification: Justification,
+    trim_line: TrimLineContext,
 }
 
 impl EffectiveSpacing {
@@ -161,7 +232,15 @@ impl EffectiveSpacing {
         Self {
             spacing,
             justification,
+            trim_line: TrimLineContext::NONE,
         }
+    }
+
+    /// Attach line-position information for `text-spacing-trim`.
+    #[inline(always)]
+    pub(crate) const fn with_trim_line(mut self, trim_line: TrimLineContext) -> Self {
+        self.trim_line = trim_line;
+        self
     }
 
     #[inline(always)]
@@ -185,7 +264,113 @@ impl EffectiveSpacing {
             gaps.after += self.justification.amount_per_opportunity;
         }
 
+        let trim = self.spacing.text_spacing_trim;
+        if trim.trims_all() {
+            let advance = atom.advance();
+            if !is_fullwidth(advance, self.spacing.font_size) {
+                return gaps;
+            }
+            match atom.characters()[0].flags.spacing_trim_class() {
+                SpacingTrimClass::Opening => {
+                    if self.trim_line.vertical {
+                        gaps.after -= advance / 2.;
+                    } else {
+                        gaps.before -= advance / 2.;
+                    }
+                }
+                SpacingTrimClass::Closing => gaps.after -= advance / 2.,
+                SpacingTrimClass::MiddleDot => {
+                    gaps.before -= advance / 4.;
+                    gaps.after -= advance / 4.;
+                }
+                SpacingTrimClass::Other => {}
+            }
+        } else if !matches!(trim, TextSpacingTrim::Auto) {
+            let advance = atom.advance();
+            let class = atom.characters()[0].flags.spacing_trim_class();
+            if class != SpacingTrimClass::Other {
+                let range = atom.shaped_clusters_range();
+                let is_first = self.trim_line.first_cluster == Some(range.start);
+                let is_last = self.trim_line.last_cluster == Some(range.end);
+                let trimmed = self.trim_decision(class, atom);
+                if trimmed && is_fullwidth(advance, self.spacing.font_size) {
+                    match class {
+                        SpacingTrimClass::Opening => {
+                            // Horizontal text anchors the ink to the start
+                            // (left); vertical text keeps it anchored to the
+                            // end (bottom), matching `vhal` glyphs.
+                            if self.trim_line.vertical {
+                                gaps.after -= advance / 2.;
+                            } else {
+                                gaps.before -= advance / 2.;
+                            }
+                        }
+                        SpacingTrimClass::Closing => gaps.after -= advance / 2.,
+                        SpacingTrimClass::MiddleDot => {
+                            // Middle dots are only trimmed by `trim-all`, never
+                            // by position; `trimmed` is false for them here.
+                        }
+                        SpacingTrimClass::Other => {}
+                    }
+                } else if !trimmed
+                    && !is_first
+                    && !is_last
+                    && is_halfwidth(advance, self.spacing.font_size)
+                {
+                    // Mid-line glyph given half-width by the font (e.g. via
+                    // `halt`) but set full-width at this position: add the
+                    // space back. At line edges the glyph is left as given.
+                    let extra = self.spacing.font_size - advance;
+                    match class {
+                        SpacingTrimClass::Opening => {
+                            if self.trim_line.vertical {
+                                gaps.after += extra;
+                            } else {
+                                gaps.before += extra;
+                            }
+                        }
+                        SpacingTrimClass::Closing => gaps.after += extra,
+                        SpacingTrimClass::MiddleDot => {
+                            gaps.before += extra / 2.;
+                            gaps.after += extra / 2.;
+                        }
+                        SpacingTrimClass::Other => {}
+                    }
+                }
+            }
+        }
+
         gaps
+    }
+
+    /// Whether this atom should be set half-width at its position on the line.
+    fn trim_decision(&self, class: SpacingTrimClass, atom: &Atom<'_>) -> bool {
+        let trim = self.spacing.text_spacing_trim;
+        let range = atom.shaped_clusters_range();
+        let is_first = self.trim_line.first_cluster == Some(range.start);
+        let is_last = self.trim_line.last_cluster == Some(range.end);
+        match class {
+            SpacingTrimClass::Opening => {
+                if is_first {
+                    trim.start_trims(self.trim_line.first_line)
+                } else {
+                    trim.adjacent_trims()
+                        && (opening_is_adjacent(atom, self.trim_line.prev_trigger))
+                }
+            }
+            SpacingTrimClass::Closing => {
+                if is_last {
+                    trim.end_trims() || self.trim_line.end_trimmed
+                } else {
+                    !self.trim_line.end_unknown
+                        && trim.adjacent_trims()
+                        && (closing_is_adjacent(atom, self.trim_line.next_trigger))
+                }
+            }
+            // Middle dots are only trimmed by `trim-all`.
+            SpacingTrimClass::MiddleDot => false,
+            SpacingTrimClass::Other => false,
+        }
     }
 
     /// The total advance of `atom`, i.e., the sum of the shaped advance and gaps.
@@ -238,4 +423,52 @@ impl EffectiveSpacing {
                 .sum()
         }
     }
+}
+
+#[inline(always)]
+fn atom_trim_class(atom: &Atom<'_>) -> SpacingTrimClass {
+    atom.characters()[0].flags.spacing_trim_class()
+}
+
+/// Whether `advance` is (approximately) the font's fullwidth advance.
+#[inline(always)]
+fn is_fullwidth(advance: f32, font_size: f32) -> bool {
+    advance > font_size * 0.75
+}
+
+/// Whether `advance` is (approximately) the font's halfwidth advance.
+///
+/// This is how a glyph given half-width by the font (e.g. via `halt`/`vhal`)
+/// is told apart from a proportional glyph: only exactly-half glyphs have a
+/// full-width setting to restore; proportional glyphs are left alone.
+#[inline(always)]
+fn is_halfwidth(advance: f32, font_size: f32) -> bool {
+    (advance - font_size / 2.).abs() <= font_size * 0.02
+}
+
+#[inline(always)]
+fn atom_is_ideographic_space(atom: &Atom<'_>) -> bool {
+    atom.characters()[0].whitespace == Whitespace::IdeographicSpace
+}
+
+#[inline(always)]
+fn opening_is_adjacent(atom: &Atom<'_>, cross_run_trigger: bool) -> bool {
+    if let Some(previous) = atom.cursor_before().prev() {
+        return matches!(
+            atom_trim_class(&previous),
+            SpacingTrimClass::Opening | SpacingTrimClass::Closing | SpacingTrimClass::MiddleDot
+        ) || atom_is_ideographic_space(&previous);
+    }
+    cross_run_trigger
+}
+
+#[inline(always)]
+fn closing_is_adjacent(atom: &Atom<'_>, cross_run_trigger: bool) -> bool {
+    if let Some(next) = atom.cursor_after().next() {
+        return matches!(
+            atom_trim_class(&next),
+            SpacingTrimClass::Closing | SpacingTrimClass::MiddleDot
+        ) || atom_is_ideographic_space(&next);
+    }
+    cross_run_trigger
 }

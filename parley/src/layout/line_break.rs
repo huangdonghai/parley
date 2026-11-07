@@ -12,6 +12,7 @@ use parlance::BidiLevel;
 
 use crate::layout::data::{AlignedSubtreeOffset, run_box_metrics};
 use crate::layout::spacing::{EffectiveSpacing, Justification, is_word_separator};
+use crate::layout::spacing::TrimLineContext;
 use crate::layout::style_metrics::{
     BoxMetrics, InlineBoxPlacement, StyleMetrics, inline_box_placement,
 };
@@ -28,7 +29,7 @@ use crate::{
 
 use core::ops::Range;
 use parley_engine::Atom;
-use parley_engine::shape::{Character, Whitespace};
+use parley_engine::shape::{Character, SpacingTrimClass, Whitespace};
 use smallvec::SmallVec;
 
 #[derive(Default)]
@@ -83,6 +84,18 @@ struct LineState {
     /// These are the line's justification opportunities, before subtracting those that end up in
     /// the line's hanging whitespace.
     num_word_separators: u32,
+    /// Shaped-cluster index where the first text atom on this line starts, if any.
+    first_text_cluster: Option<u32>,
+    /// Shaped-cluster index where the last text atom on this line ends (exclusive), if any.
+    last_text_cluster: Option<u32>,
+    /// Trim class of the last text atom appended, for end-of-line handling at commit.
+    last_text_class: SpacingTrimClass,
+    /// `text-spacing-trim` policy of the last text atom's run.
+    last_text_trim: crate::TextSpacingTrim,
+    /// Whether the last text atom triggers adjacent collapsing for the next atom.
+    last_text_trigger: bool,
+    /// Whether the line's last closing atom was trimmed to fit at the end.
+    end_trimmed: bool,
 }
 
 impl LineState {
@@ -91,6 +104,12 @@ impl LineState {
         self.x = 0.0;
         self.box_metrics.reset();
         self.num_word_separators = 0;
+        self.first_text_cluster = None;
+        self.last_text_cluster = None;
+        self.last_text_class = SpacingTrimClass::Other;
+        self.last_text_trim = crate::TextSpacingTrim::space_all();
+        self.last_text_trigger = false;
+        self.end_trimmed = false;
     }
 }
 
@@ -648,6 +667,8 @@ pub struct BreakerState {
     prev_boundary: Option<PrevBoundaryState>,
     /// Saved breaker state for the last emergency line-breaking opportunity
     emergency_boundary: Option<PrevBoundaryState>,
+    /// Reason the previous line was committed, if any (for `space-first`).
+    prev_break_reason: Option<BreakReason>,
 }
 
 impl Default for BreakerState {
@@ -668,6 +689,7 @@ impl Default for BreakerState {
             subtrees: SubtreeHistory::default(),
             prev_boundary: None,
             emergency_boundary: None,
+            prev_break_reason: None,
         }
     }
 }
@@ -692,6 +714,18 @@ impl BreakerState {
         self.line.clusters.end = atom.shaped_clusters_range().end;
         self.cluster_idx = atom.shaped_clusters_range().end;
         self.line.x = next_x;
+        let range = atom.shaped_clusters_range();
+        if self.line.first_text_cluster.is_none() {
+            self.line.first_text_cluster = Some(range.start);
+        }
+        self.line.last_text_cluster = Some(range.end);
+        self.line.last_text_class = atom.characters()[0].flags.spacing_trim_class();
+        let run_index = data.items[self.item_idx].index;
+        self.line.last_text_trim = data.runs[run_index].spacing.text_spacing_trim;
+        self.line.last_text_trigger = matches!(
+            self.line.last_text_class,
+            SpacingTrimClass::Opening | SpacingTrimClass::Closing | SpacingTrimClass::MiddleDot
+        ) || atom.characters()[0].whitespace == Whitespace::IdeographicSpace;
         self.line.num_word_separators += u32::from(is_word_separator);
         self.line.box_metrics.add_text(
             self.item_idx,
@@ -958,6 +992,7 @@ impl<'a, B: Brush> BreakLines<'a, B> {
         let line_height = self.finish_line(self.lines.lines.len() - 1, line_height, invisible);
         self.reset_line();
 
+        self.state.prev_break_reason = Some(reason);
         self.state.line_y += line_height as f64;
 
         Some(YieldData::LineBreak(
@@ -1141,6 +1176,9 @@ impl<'a, B: Brush> BreakLines<'a, B> {
 
                     // Additional spacing to apply between atoms.
                     let spacing = EffectiveSpacing::new(run.data.spacing, Justification::NONE);
+                    let run_trim = run.data.spacing.text_spacing_trim;
+                    let is_first_line = self.state.lines == 0
+                        || self.state.prev_break_reason == Some(BreakReason::Explicit);
 
                     let line_height = run.data.line_height;
 
@@ -1203,7 +1241,25 @@ impl<'a, B: Brush> BreakLines<'a, B> {
 
                         // Breaking an atom requires reshaping, which we don't do here, so it is
                         // consumed as a whole (this includes all clusters of a ligature).
-                        let advance = spacing.atom_advance(&atom);
+                        // `text-spacing-trim` needs the line position: start-of-line atoms
+                        // are known here, end-of-line atoms are not (deferred via
+                        // `end_unknown`, with the overflow retry below handling `allow-end`).
+                        let is_first_text = self.state.line.first_text_cluster.is_none();
+                        let atom_spacing = spacing.with_trim_line(TrimLineContext {
+                            first_cluster: if is_first_text {
+                                Some(atom.shaped_clusters_range().start)
+                            } else {
+                                self.state.line.first_text_cluster
+                            },
+                            last_cluster: None,
+                            first_line: is_first_line,
+                            end_trimmed: false,
+                            end_unknown: true,
+                            vertical: self.layout.data.vertical,
+                            prev_trigger: self.state.line.last_text_trigger,
+                            next_trigger: false,
+                        });
+                        let advance = atom_spacing.atom_advance(&atom);
 
                         // Compute the x position of the content being currently processed
                         let next_x = self.state.line.x + advance;
@@ -1229,6 +1285,44 @@ impl<'a, B: Brush> BreakLines<'a, B> {
                         // in the line. If there is no such line-breaking opportunity (such as if wrapping is disabled), then
                         // we fall back to appending the content to the line anyway.
                         else {
+                            // `allow-end`/`trim-end`: a closing atom that does not fit
+                            // full-width may be trimmed to end the line here instead
+                            // of wrapping to the next line.
+                            if first_character.flags.spacing_trim_class()
+                                == SpacingTrimClass::Closing
+                                && run_trim.end_can_trim()
+                            {
+                                let end_ctx = TrimLineContext {
+                                    first_cluster: self.state.line.first_text_cluster,
+                                    last_cluster: Some(atom.shaped_clusters_range().end),
+                                    first_line: is_first_line,
+                                    end_trimmed: true,
+                                    end_unknown: false,
+                                    vertical: self.layout.data.vertical,
+                                    prev_trigger: self.state.line.last_text_trigger,
+                                    next_trigger: false,
+                                };
+                                let trimmed_next_x = self.state.line.x
+                                    + spacing.with_trim_line(end_ctx).atom_advance(&atom);
+                                if trimmed_next_x <= max_advance {
+                                    if max_height_exceeded {
+                                        return self.max_height_break_data(line_height);
+                                    }
+                                    self.state.append_atom_to_line(
+                                        &atom,
+                                        trimmed_next_x,
+                                        style_index,
+                                        &self.layout.data,
+                                        is_separator,
+                                    );
+                                    self.state.line.end_trimmed = true;
+                                    return self.start_new_line(
+                                        BreakReason::Regular,
+                                        max_advance,
+                                        line_indent,
+                                    );
+                                }
+                            }
                             // Case: the atom fits once its hanging whitespace is excluded.
                             //
                             // We append it to the line, with the whitespace hanging past the end.
@@ -1840,11 +1934,20 @@ fn commit_line<B: Brush>(
         reorder_line_items(&mut lines.line_items[start_item_idx..end_item_idx]);
     }
 
+    // `trim-end` applies retroactively: the last atom's advance was measured
+    // untrimmed (its end position was not yet known), but painting must trim it.
+    if state.last_text_class == SpacingTrimClass::Closing && state.last_text_trim.end_trims() {
+        state.end_trimmed = true;
+    }
+
     lines.lines.push(LineData {
         item_range: start_item_idx..end_item_idx,
         text_range: text_start..text_end,
         max_advance,
         break_reason,
+        first_text_cluster: state.first_text_cluster,
+        last_text_cluster: state.last_text_cluster,
+        end_trimmed: state.end_trimmed,
         num_justification_opportunities,
         justification: Justification {
             justification_end_cluster,

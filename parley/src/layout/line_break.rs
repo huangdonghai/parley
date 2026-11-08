@@ -108,10 +108,17 @@ struct LineState {
     last_text_hanging_run_end: bool,
     /// Whether the last text atom appended is after an inline end inset.
     last_text_hanging_blocked: bool,
+    /// Whether the last text atom was a justification opportunity.
+    last_text_hanging_justification: bool,
+    /// Whether the text atom before the last hanging candidate was a
+    /// justification opportunity.
+    last_text_hanging_seam_justification: bool,
     /// Amount of the line's end punctuation currently hanging provisionally.
     last_text_end_hanging_advance: f32,
     first_hanging_cluster: Option<u32>,
     first_hanging_advance: f32,
+    first_atom_justification: bool,
+    last_atom_justification: bool,
     /// `text-spacing-trim` policy of the last text atom's run.
     last_text_trim: crate::TextSpacingTrim,
     /// Whether the last text atom triggers adjacent collapsing for the next atom.
@@ -139,9 +146,13 @@ impl LineState {
         self.hanging_followed_by_content = false;
         self.last_text_hanging_run_end = false;
         self.last_text_hanging_blocked = false;
+        self.last_text_hanging_justification = false;
+        self.last_text_hanging_seam_justification = false;
         self.last_text_end_hanging_advance = 0.0;
         self.first_hanging_cluster = None;
         self.first_hanging_advance = 0.0;
+        self.first_atom_justification = false;
+        self.last_atom_justification = false;
         self.last_text_trim = crate::TextSpacingTrim::space_all();
         self.last_text_trigger = false;
         self.end_trimmed = false;
@@ -748,8 +759,14 @@ impl BreakerState {
         next_x: f32,
         style_index: u16,
         data: &LayoutData<B>,
-        is_word_separator: bool,
+        is_justification_opportunity: bool,
     ) {
+        let first_text = self.line.first_text_cluster.is_none();
+        let previous_atom_justification = self.line.last_atom_justification;
+        self.line.last_atom_justification = is_justification_opportunity;
+        if first_text {
+            self.line.first_atom_justification = is_justification_opportunity;
+        }
         self.line.items.end = self.item_idx + 1;
         self.line.clusters.end = atom.shaped_clusters_range().end;
         self.cluster_idx = atom.shaped_clusters_range().end;
@@ -781,6 +798,8 @@ impl BreakerState {
             self.line.last_text_hanging_run_end = range.end == run_range.end;
             self.line.last_text_hanging_blocked =
                 data.styles[style_index as usize].hang_end_blocked;
+            self.line.last_text_hanging_justification = is_justification_opportunity;
+            self.line.last_text_hanging_seam_justification = previous_atom_justification;
             self.last_text_span_id = Some(data.styles[style_index as usize].inline_element_id);
         }
         let run_index = data.items[self.item_idx].index;
@@ -790,7 +809,7 @@ impl BreakerState {
             SpacingTrimClass::Opening | SpacingTrimClass::Closing | SpacingTrimClass::MiddleDot
         ) || atom.characters()[0].whitespace
             == Whitespace::IdeographicSpace;
-        self.line.num_word_separators += u32::from(is_word_separator);
+        self.line.num_word_separators += u32::from(is_justification_opportunity);
         self.line.box_metrics.add_text(
             self.item_idx,
             self.run_idx,
@@ -1460,7 +1479,9 @@ impl<'a, B: Brush> BreakLines<'a, B> {
                                 };
                                 let hanging_next_x = self.state.line.x
                                     + spacing.with_trim_line(end_ctx).atom_advance(&atom);
-                                if hanging_next_x <= max_advance {
+                                if self.state.line.x <= max_advance
+                                    && hanging_next_x <= max_advance
+                                {
                                     if max_height_exceeded {
                                         return self.max_height_break_data(line_height);
                                     }
@@ -2345,7 +2366,7 @@ fn commit_line<B: Brush>(
     );
     // The word separators counted as the line was built include the line's hanging whitespace, and
     // hanging whitespace is not stretched by justification.
-    let num_justification_opportunities = state.num_word_separators - hanging_opportunities;
+    let mut num_justification_opportunities = state.num_word_separators - hanging_opportunities;
 
     // Reorder the items within the line (if required). Reordering is required if the line contains
     // a mix of bidi levels (a mix of LTR and RTL text)
@@ -2424,6 +2445,19 @@ fn commit_line<B: Brush>(
             0.0
         };
     let end_hanging = breaker_hung || hanging_punctuation_advance != 0.0;
+    // Neither a hung glyph nor the seam into it is room that justification
+    // may spread into the margin (CSS Text 3 §8.2.1). Once either end is
+    // settled, the line's opportunity count has to match the gaps that are
+    // actually stretchable, or the last ordinary glyph stops short of the
+    // line's edge.
+    if state.first_hanging_cluster.is_some() && state.first_atom_justification {
+        num_justification_opportunities = num_justification_opportunities.saturating_sub(1);
+    }
+    if end_hanging {
+        num_justification_opportunities = num_justification_opportunities
+            .saturating_sub(u32::from(state.last_text_hanging_justification))
+            .saturating_sub(u32::from(state.last_text_hanging_seam_justification));
+    }
     state.last_hanging_cluster = end_hanging.then_some(
         state
             .last_text_hanging_cluster

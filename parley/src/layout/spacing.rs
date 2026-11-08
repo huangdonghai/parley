@@ -338,10 +338,14 @@ impl EffectiveSpacing {
         let whitespace = atom.characters()[0].whitespace;
         let mut gaps = self.spacing.gaps(whitespace);
         let hanging_class = atom.characters()[0].flags.hanging_punctuation_class();
+        let range = atom.shaped_clusters_range();
+        let is_hanging_punctuation = self.trim_line.first_punctuation_hanging_cluster
+            == Some(range.start)
+            || self.trim_line.last_punctuation_hanging_cluster == Some(range.start);
         // `before` is the visually left (top in vertical) side and `after` the visually
         // right one; the hanging edge is the line's start or end edge, which is the
         // visually right one in RTL text and the left one otherwise.
-        if self.trim_line.first_punctuation_hanging_cluster == Some(atom.shaped_clusters_range().start)
+        if self.trim_line.first_punctuation_hanging_cluster == Some(range.start)
             && matches!(
                 hanging_class,
                 parley_engine::shape::HangingPunctuationClass::Opening
@@ -354,7 +358,7 @@ impl EffectiveSpacing {
                 gaps.before = -atom.advance();
             }
         }
-        if self.trim_line.last_punctuation_hanging_cluster == Some(atom.shaped_clusters_range().start)
+        if self.trim_line.last_punctuation_hanging_cluster == Some(range.start)
             && matches!(
                 hanging_class,
                 parley_engine::shape::HangingPunctuationClass::StopOrComma
@@ -379,14 +383,19 @@ impl EffectiveSpacing {
         // spaces, the boundary between two typographic character units (CSS Text 3 6.4.5).
         let is_justification_opportunity =
             is_word_separator(whitespace) || atom.characters()[0].flags.is_cjk_typographic();
+        let starts_at_hanging =
+            self.trim_line.first_punctuation_hanging_cluster == Some(range.start);
+        let ends_at_hanging = self.trim_line.last_punctuation_hanging_cluster == Some(range.end);
         if is_justification_opportunity
-            && atom.shaped_clusters_range().end <= self.justification.justification_end_cluster
+            && !starts_at_hanging
+            && !ends_at_hanging
+            && range.end <= self.justification.justification_end_cluster
         {
             gaps.after += self.justification.amount_per_opportunity;
         }
 
         let trim = self.spacing.text_spacing_trim();
-        if trim.trims_all() {
+        if trim.trims_all() && !is_hanging_punctuation {
             let advance = atom.advance();
             if !is_fullwidth(advance, self.spacing.font_size) {
                 return gaps;

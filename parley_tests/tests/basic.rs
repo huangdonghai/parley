@@ -6,9 +6,9 @@
 use crate::util::TestEnv;
 use crate::{test_name, util::ColorBrush};
 use parley::{
-    Alignment, AlignmentOptions, BreakReason, ContentWidths, FontFamily, FontWeight, InlineBox,
-    InlineBoxKind, Layout, LineHeight, PositionedLayoutItem, StyleProperty, TextStyle,
-    TextWrapMode, VerticalAlign, WhiteSpaceCollapse,
+    Alignment, AlignmentOptions, BreakReason, ContentWidths, FontFamily, FontWeight,
+    HangingPunctuation, InlineBox, InlineBoxKind, Layout, LineHeight, PositionedLayoutItem,
+    StyleProperty, TextStyle, TextWrapMode, VerticalAlign, WhiteSpaceCollapse,
 };
 use peniko::color::{AlphaColor, Srgb, palette};
 use peniko::kurbo::Size;
@@ -889,6 +889,56 @@ fn justify_with_overflowing_trailing_space() {
     assert!(
         (justified_space_advances[0] - justified_space_advances[1]).abs() < 0.001,
         "The two spaces on the first line should be equal in size"
+    );
+}
+
+#[test]
+fn justify_does_not_spend_the_seam_into_a_hung_glyph() {
+    let mut env = TestEnv::new(test_name!(), None);
+
+    let text = "甲乙。\n丙丁戊";
+    let mut builder = env.ranged_builder(text);
+    builder.push_default(StyleProperty::HangingPunctuation(
+        HangingPunctuation::FORCE_END,
+    ));
+    let mut layout = builder.build(text);
+    layout.break_all_lines(Some(200.0));
+    layout.align(
+        Alignment::Justify,
+        AlignmentOptions {
+            last_line_alignment: Some(Alignment::Justify),
+            ..Default::default()
+        },
+    );
+
+    let line = layout.get(0).unwrap();
+    assert!(line.metrics().hanging_advance > 0.0, "the comma hangs");
+
+    let first = line
+        .runs()
+        .flat_map(|run| run.clusters())
+        .find(|cluster| {
+            let range = cluster.text_range();
+            range.start == 0 && range.end == "甲".len()
+        })
+        .expect("the first character");
+    let before = line
+        .runs()
+        .flat_map(|run| run.clusters())
+        .find(|cluster| {
+            let range = cluster.text_range();
+            range.start == "甲".len() && range.end == "甲乙".len()
+        })
+        .expect("the character before the stop");
+
+    assert!(
+        first.spacing_after() > 0.0,
+        "justification still stretches the gap between ordinary characters"
+    );
+    assert_eq!(
+        before.spacing_after(),
+        0.0,
+        "justification must not leave the text short of the line edge"
     );
 }
 

@@ -18,7 +18,9 @@ use crate::font::FontContext;
 use crate::style::TextStyle;
 use crate::util::nearly_eq;
 use crate::{LineBreak, LineHeight, OverflowWrap, VerticalAlign, layout};
-use crate::{TextSpacingTrim, TextWrapMode, WhiteSpaceCollapse, WordBreak};
+use crate::{
+    TextAutospace, TextOrientation, TextSpacingTrim, TextWrapMode, WhiteSpaceCollapse, WordBreak,
+};
 use core::borrow::Borrow;
 use core::ops::Range;
 use fontique::FamilyId;
@@ -165,6 +167,9 @@ impl ResolveContext {
             StyleProperty::WordSpacing(value) => WordSpacing(*value * scale),
             StyleProperty::LetterSpacing(value) => LetterSpacing(*value * scale),
             StyleProperty::TextSpacingTrim(value) => TextSpacingTrim(*value),
+            StyleProperty::TextAutospace(value) => TextAutospace(*value),
+            StyleProperty::TextOrientation(value) => TextOrientation(*value),
+            StyleProperty::TextCombineUpright(value) => TextCombineUpright(*value),
             StyleProperty::WordBreak(value) => WordBreak(*value),
             StyleProperty::LineBreak(value) => LineBreak(*value),
             StyleProperty::OverflowWrap(value) => OverflowWrap(*value),
@@ -207,6 +212,9 @@ impl ResolveContext {
             word_spacing: raw_style.word_spacing * scale,
             letter_spacing: raw_style.letter_spacing * scale,
             text_spacing_trim: raw_style.text_spacing_trim,
+            text_autospace: raw_style.text_autospace,
+            text_orientation: raw_style.text_orientation,
+            text_combine_upright: raw_style.text_combine_upright,
             word_break: raw_style.word_break,
             line_break: raw_style.line_break,
             overflow_wrap: raw_style.overflow_wrap,
@@ -394,6 +402,12 @@ pub(crate) enum ResolvedProperty<B: Brush> {
     LetterSpacing(f32),
     /// CSS `text-spacing-trim`.
     TextSpacingTrim(TextSpacingTrim),
+    /// CSS `text-autospace`.
+    TextAutospace(TextAutospace),
+    /// CSS `text-orientation`.
+    TextOrientation(TextOrientation),
+    /// CSS `text-combine-upright`.
+    TextCombineUpright(bool),
     /// Control over where words can wrap.
     WordBreak(WordBreak),
     /// Strictness of line-breaking rules.
@@ -444,6 +458,12 @@ pub(crate) struct ResolvedStyle<B: Brush> {
     pub(crate) letter_spacing: f32,
     /// CSS `text-spacing-trim`.
     pub(crate) text_spacing_trim: TextSpacingTrim,
+    /// CSS `text-autospace`.
+    pub(crate) text_autospace: TextAutospace,
+    /// CSS `text-orientation`.
+    pub(crate) text_orientation: TextOrientation,
+    /// CSS `text-combine-upright`.
+    pub(crate) text_combine_upright: bool,
     /// Control over where words can wrap.
     pub(crate) word_break: WordBreak,
     /// Strictness of line-breaking rules.
@@ -483,6 +503,9 @@ impl<B: Brush> ResolvedStyle<B> {
             WordSpacing(value) => self.word_spacing = value,
             LetterSpacing(value) => self.letter_spacing = value,
             TextSpacingTrim(value) => self.text_spacing_trim = value,
+            TextAutospace(value) => self.text_autospace = value,
+            TextOrientation(value) => self.text_orientation = value,
+            TextCombineUpright(value) => self.text_combine_upright = value,
             WordBreak(value) => self.word_break = value,
             LineBreak(value) => self.line_break = value,
             OverflowWrap(value) => self.overflow_wrap = value,
@@ -516,6 +539,9 @@ impl<B: Brush> ResolvedStyle<B> {
             WordSpacing(value) => nearly_eq(self.word_spacing, *value),
             LetterSpacing(value) => nearly_eq(self.letter_spacing, *value),
             TextSpacingTrim(value) => self.text_spacing_trim == *value,
+            TextAutospace(value) => self.text_autospace == *value,
+            TextOrientation(value) => self.text_orientation == *value,
+            TextCombineUpright(value) => self.text_combine_upright == *value,
             WordBreak(value) => self.word_break == *value,
             LineBreak(value) => self.line_break == *value,
             OverflowWrap(value) => self.overflow_wrap == *value,
@@ -536,6 +562,7 @@ impl<B: Brush> ResolvedStyle<B> {
             text_wrap_mode: self.text_wrap_mode,
             white_space_collapse: self.white_space_collapse,
             text_spacing_trim: self.text_spacing_trim,
+            text_autospace: self.text_autospace,
             locale: self.locale,
         }
     }

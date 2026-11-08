@@ -6,7 +6,7 @@
 use core::ops::Range;
 
 use crate::shape::Whitespace;
-use icu_properties::props::GeneralCategory;
+use icu_properties::props::{EastAsianWidth, GeneralCategory, Script};
 use parley_data::Properties;
 
 /// Data for a single character of the source text.
@@ -275,7 +275,20 @@ impl ShapedCluster {
 
 /// Properties of a [`Character`].
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
-pub struct CharacterFlags(u8);
+pub struct CharacterFlags(u16);
+
+/// The classes `text-autospace` distinguishes between neighbouring characters.
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
+#[repr(u8)]
+pub enum AutoSpaceClass {
+    /// Not spaced by `text-autospace`: spaces, controls and punctuation.
+    #[default]
+    Other = 0,
+    /// A character of an ideographic script.
+    Ideograph = 1,
+    /// A non-ideographic letter, mark or digit, or any other narrow character.
+    NonIdeograph = 2,
+}
 
 /// The punctuation classes used by `text-spacing-trim`.
 #[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
@@ -312,6 +325,9 @@ impl CharacterFlags {
     const CJK_TYPOGRAPHIC: u8 = 1 << 5;
     const SPACING_TRIM_SHIFT: u8 = 6;
     const SPACING_TRIM_MASK: u8 = 0b11 << Self::SPACING_TRIM_SHIFT;
+    const AUTO_SPACE_SHIFT: u16 = 8;
+    const AUTO_SPACE_MASK: u16 = 0b11 << Self::AUTO_SPACE_SHIFT;
+    const AUTO_SPACE_UPRIGHT: u16 = 1 << 10;
 
     #[inline(always)]
     pub fn new(source_char: char, is_word_boundary: bool, is_soft_wrap_opportunity: bool) -> Self {
@@ -323,24 +339,24 @@ impl CharacterFlags {
         )]
         let len_utf8 = source_char.len_utf8() as u8;
         Self(
-            (len_utf8 - 1)
-                | if is_emoji { Self::EMOJI } else { 0 }
+            u16::from(len_utf8 - 1)
+                | if is_emoji { u16::from(Self::EMOJI) } else { 0 }
                 | if is_word_boundary {
-                    Self::WORD_BOUNDARY
+                    u16::from(Self::WORD_BOUNDARY)
                 } else {
                     0
                 }
                 | if is_soft_wrap_opportunity {
-                    Self::SOFT_WRAP_OPPORTUNITY
+                    u16::from(Self::SOFT_WRAP_OPPORTUNITY)
                 } else {
                     0
                 }
                 | if is_cjk_typographic_char(source_char) {
-                    Self::CJK_TYPOGRAPHIC
+                    u16::from(Self::CJK_TYPOGRAPHIC)
                 } else {
                     0
                 }
-                | ((spacing_trim_class(source_char) as u8) << Self::SPACING_TRIM_SHIFT),
+                | (u16::from(spacing_trim_class(source_char) as u8) << Self::SPACING_TRIM_SHIFT),
         )
     }
 
@@ -351,37 +367,66 @@ impl CharacterFlags {
     /// [line-breaking]: https://www.unicode.org/reports/tr14/
     #[inline(always)]
     pub fn is_soft_wrap_opportunity(self) -> bool {
-        self.0 & Self::SOFT_WRAP_OPPORTUNITY != 0
+        self.0 & u16::from(Self::SOFT_WRAP_OPPORTUNITY) != 0
     }
 
     /// Returns if there is a word boundary before the character.
     #[inline(always)]
     pub fn is_word_boundary(self) -> bool {
-        self.0 & Self::WORD_BOUNDARY != 0
+        self.0 & u16::from(Self::WORD_BOUNDARY) != 0
     }
 
     /// Returns if the character is an emoji.
     #[inline(always)]
     pub fn is_emoji(self) -> bool {
-        self.0 & Self::EMOJI != 0
+        self.0 & u16::from(Self::EMOJI) != 0
     }
 
     /// Whether the character is a typographic character unit of a block or clustered script,
     /// i.e. a justification opportunity for CJK text (CSS Text 3 6.4.5).
     #[inline(always)]
     pub fn is_cjk_typographic(self) -> bool {
-        self.0 & Self::CJK_TYPOGRAPHIC != 0
+        self.0 & u16::from(Self::CJK_TYPOGRAPHIC) != 0
     }
 
     /// The `text-spacing-trim` class for this character.
     #[inline(always)]
     pub fn spacing_trim_class(self) -> SpacingTrimClass {
-        match (self.0 & Self::SPACING_TRIM_MASK) >> Self::SPACING_TRIM_SHIFT {
+        match (self.0 & u16::from(Self::SPACING_TRIM_MASK)) >> Self::SPACING_TRIM_SHIFT {
             1 => SpacingTrimClass::Opening,
             2 => SpacingTrimClass::Closing,
             3 => SpacingTrimClass::MiddleDot,
             _ => SpacingTrimClass::Other,
         }
+    }
+
+    /// The `text-autospace` class for this character.
+    #[inline(always)]
+    pub fn auto_space_class(self) -> AutoSpaceClass {
+        match (self.0 & Self::AUTO_SPACE_MASK) >> Self::AUTO_SPACE_SHIFT {
+            1 => AutoSpaceClass::Ideograph,
+            2 => AutoSpaceClass::NonIdeograph,
+            _ => AutoSpaceClass::Other,
+        }
+    }
+
+    /// Set the `text-autospace` class for this character.
+    #[inline(always)]
+    pub fn set_auto_space_class(&mut self, class: AutoSpaceClass) {
+        self.0 = (self.0 & !Self::AUTO_SPACE_MASK) | ((class as u16) << Self::AUTO_SPACE_SHIFT);
+    }
+
+    /// Whether this character is typeset upright in a vertical writing mode.
+    #[inline(always)]
+    pub fn is_auto_space_upright(self) -> bool {
+        self.0 & Self::AUTO_SPACE_UPRIGHT != 0
+    }
+
+    /// Set whether this character is typeset upright in a vertical writing mode.
+    #[inline(always)]
+    pub fn set_auto_space_upright(&mut self, upright: bool) {
+        self.0 = (self.0 & !Self::AUTO_SPACE_UPRIGHT)
+            | if upright { Self::AUTO_SPACE_UPRIGHT } else { 0 };
     }
 
     /// Override this character's `text-spacing-trim` class.
@@ -390,7 +435,8 @@ impl CharacterFlags {
     /// which cannot be decided from the character alone.
     #[inline(always)]
     pub fn set_spacing_trim_class(&mut self, class: SpacingTrimClass) {
-        self.0 = (self.0 & !Self::SPACING_TRIM_MASK) | ((class as u8) << Self::SPACING_TRIM_SHIFT);
+        self.0 = (self.0 & !u16::from(Self::SPACING_TRIM_MASK))
+            | (u16::from(class as u8) << Self::SPACING_TRIM_SHIFT);
     }
 
     /// Returns the number of bytes the source character would need if encoded in UTF-8.
@@ -398,7 +444,7 @@ impl CharacterFlags {
     /// That number of bytes is always between 1 and 4, inclusive.
     #[inline(always)]
     pub fn len_utf8(self) -> usize {
-        (self.0 & Self::LEN_UTF8_MASK) as usize + 1
+        (self.0 & u16::from(Self::LEN_UTF8_MASK)) as usize + 1
     }
 }
 
@@ -462,6 +508,71 @@ fn spacing_trim_class(ch: char) -> SpacingTrimClass {
             }
         }
     }
+}
+
+/// Classify a character for `text-autospace` (CSS Text 4 §8.4.1).
+///
+/// This is a function taking the character and its Unicode properties because
+/// `CharacterFlags::new` cannot take both; callers run it once per character
+/// only when a style in the layout asks for `text-autospace: normal`.
+#[allow(dead_code)]
+pub(crate) fn auto_space_class(
+    ch: char,
+    properties: Properties,
+    east_asian_width: EastAsianWidth,
+) -> AutoSpaceClass {
+    if is_ideographic(ch, properties) {
+        return AutoSpaceClass::Ideograph;
+    }
+
+    let category = properties.general_category();
+    let non_ideographic = matches!(
+        category,
+        GeneralCategory::UppercaseLetter
+            | GeneralCategory::LowercaseLetter
+            | GeneralCategory::TitlecaseLetter
+            | GeneralCategory::ModifierLetter
+            | GeneralCategory::OtherLetter
+            | GeneralCategory::NonspacingMark
+            | GeneralCategory::SpacingMark
+            | GeneralCategory::EnclosingMark
+            | GeneralCategory::DecimalNumber
+    );
+    if !non_ideographic
+        || matches!(
+            east_asian_width,
+            EastAsianWidth::Fullwidth | EastAsianWidth::Wide
+        )
+    {
+        return AutoSpaceClass::Other;
+    }
+
+    AutoSpaceClass::NonIdeograph
+}
+
+fn is_ideographic(ch: char, properties: Properties) -> bool {
+    if properties.script() == Script::Han {
+        return true;
+    }
+
+    let in_ideographic_range = matches!(
+        ch as u32,
+        0x3041..=0x30FF | 0x31C0..=0x31EF | 0x31F0..=0x31FF
+    );
+    if !in_ideographic_range {
+        return false;
+    }
+
+    !matches!(
+        properties.general_category(),
+        GeneralCategory::ConnectorPunctuation
+            | GeneralCategory::DashPunctuation
+            | GeneralCategory::OpenPunctuation
+            | GeneralCategory::ClosePunctuation
+            | GeneralCategory::InitialPunctuation
+            | GeneralCategory::FinalPunctuation
+            | GeneralCategory::OtherPunctuation
+    )
 }
 
 #[cfg(test)]

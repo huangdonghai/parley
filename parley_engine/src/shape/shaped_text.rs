@@ -6,13 +6,15 @@
 use core::ops::Range;
 
 use alloc::vec::Vec;
+use icu_properties::props::EastAsianWidth;
 use icu_properties::{CodePointMapData, props::VerticalOrientation};
 use parlance::{BidiLevel, NormalizedCoord, TextOrientation};
+use parley_data::Properties;
+use skrifa::raw::TableProvider as _;
 use skrifa::{
     GlyphId, MetadataProvider,
     instance::{LocationRef, Size},
 };
-use skrifa::raw::TableProvider as _;
 
 use crate::{
     CharInfo, FontInstance, Glyph,
@@ -21,8 +23,20 @@ use crate::{
 
 use super::{
     Character, CharacterFlags, ShapedCluster, ShapedClusterFlags, SpacingTrimClass, Whitespace,
-    atom::ShapedSlice, shaper::ShapeOptions,
+    atom::ShapedSlice, data::auto_space_class, shaper::ShapeOptions,
 };
+
+/// The per-style inputs `text-autospace` needs, resolved by Parley from each
+/// style's computed properties.
+#[derive(Copy, Clone, Debug, Default, PartialEq)]
+pub struct AutoSpaceStyle {
+    /// Whether this style asks for automatic spacing.
+    pub enabled: bool,
+    /// The orientation of this style's non-ideographic characters in a column.
+    pub orientation: TextOrientation,
+    /// Whether this style's characters are a `text-combine-upright` composition.
+    pub combined: bool,
+}
 
 /// Metrics that apply to the glyphs of a font.
 ///
@@ -98,11 +112,7 @@ impl FontMetrics {
                 ),
         );
         Some(Self::from_skrifa_metrics(
-            &skrifa::metrics::Metrics::new(
-                &font_ref,
-                Size::new(font_size),
-                &location,
-            ),
+            &skrifa::metrics::Metrics::new(&font_ref, Size::new(font_size), &location),
             font_size,
         ))
     }
@@ -186,6 +196,88 @@ impl ShapedText {
         self.normalized_coords.clear();
     }
 
+    /// Classify every character of `text` for `text-autospace` (CSS Text 4 §8.4).
+    ///
+    /// `styles` is indexed by each character's style id; a character is classified when its
+    /// style enables `text-autospace`, and marked upright when its style combines upright
+    /// or when its `text-orientation` says so in a vertical writing mode. Calling this before
+    /// line breaking keeps the character classification to one pass and lets the spacing
+    /// calculation read it from packed flags instead of looking properties up again. It is
+    /// cheap when no style enables the property: every flag stays at its default.
+    pub fn set_autospace_classes(&mut self, text: &str, styles: &[AutoSpaceStyle]) {
+        if styles.is_empty() || !styles.iter().any(|style| style.enabled || style.combined) {
+            return;
+        }
+
+        let vertical_orientation = CodePointMapData::<VerticalOrientation>::new();
+        let east_asian_width = CodePointMapData::<EastAsianWidth>::new();
+        for (ch, character) in text.chars().zip(self.characters.iter_mut()) {
+            let Some(style) = styles.get(character.style_index as usize) else {
+                continue;
+            };
+
+            if style.enabled {
+                let properties = Properties::get(ch);
+                character.flags.set_auto_space_class(auto_space_class(
+                    ch,
+                    properties,
+                    east_asian_width.get(ch),
+                ));
+            }
+
+            if style.combined {
+                character.flags.set_auto_space_upright(true);
+                continue;
+            }
+
+            let upright = match style.orientation {
+                TextOrientation::Upright => true,
+                TextOrientation::Sideways => false,
+                TextOrientation::Mixed => {
+                    vertical_orientation.get(ch) != VerticalOrientation::Rotated
+                }
+            };
+            if upright {
+                character.flags.set_auto_space_upright(true);
+            }
+        }
+    }
+
+    /// The ideographic advance of the font at `font_index`, in horizontal and vertical layout
+    /// units. A font without an ideograph is measured with its em square.
+    pub fn ideograph_advance(&self, font_index: usize, font_size: f32) -> (f32, f32) {
+        let Some(font) = self.fonts.get(font_index) else {
+            return (font_size, font_size);
+        };
+        let Ok(font_ref) = skrifa::FontRef::from_index(font.font.data.as_ref(), font.font.index)
+        else {
+            return (font_size, font_size);
+        };
+
+        let Some(glyph_id) = font_ref.charmap().map('水') else {
+            return (font_size, font_size);
+        };
+        let Some(units_per_em) = font_ref.head().ok().map(|head| head.units_per_em() as f32) else {
+            return (font_size, font_size);
+        };
+
+        let to_units = |advance: u16| (advance as f32 / units_per_em) * font_size;
+        let horizontal = font_ref
+            .hmtx()
+            .ok()
+            .and_then(|hmtx| hmtx.advance(glyph_id))
+            .map(to_units)
+            .unwrap_or(font_size);
+        let vertical = font_ref
+            .vmtx()
+            .ok()
+            .and_then(|vmtx| vmtx.advance(glyph_id))
+            .map(to_units)
+            .unwrap_or(horizontal);
+
+        (horizontal, vertical)
+    }
+
     /// Get a [`ShapedSlice`] of the run at `run_index`.
     pub fn run_slice(&self, run_index: u32) -> ShapedSlice<'_> {
         let run = &self.runs[run_index as usize];
@@ -226,13 +318,7 @@ impl ShapedText {
     /// result.
     pub fn set_vertical_advances(&mut self, text: &str, orientation: TextOrientation) {
         let vertical_orientation = CodePointMapData::<VerticalOrientation>::new();
-        let runs: Vec<(
-            usize,
-            f32,
-            Range<u32>,
-            FontMetrics,
-            VerticalAdvanceFeatures,
-        )> = self
+        let runs: Vec<(usize, f32, Range<u32>, FontMetrics, VerticalAdvanceFeatures)> = self
             .runs
             .iter()
             .map(|run| {
@@ -249,10 +335,7 @@ impl ShapedText {
         // few hundred glyphs over and over, so read the font tables once per glyph.
         let mut metrics_cache = hashbrown::HashMap::new();
 
-        for (
-            run_index,
-            (font_index, font_size, cluster_range, font_metrics, vertical_features),
-        ) in
+        for (run_index, (font_index, font_size, cluster_range, font_metrics, vertical_features)) in
             runs.iter().enumerate()
         {
             let font = &self.fonts[*font_index].font;
@@ -260,11 +343,7 @@ impl ShapedText {
             else {
                 continue;
             };
-            let Some(upem) = font_ref
-                .head()
-                .ok()
-                .map(|head| head.units_per_em() as f32)
-            else {
+            let Some(upem) = font_ref.head().ok().map(|head| head.units_per_em() as f32) else {
                 continue;
             };
             let vmtx = font_ref.vmtx().ok();
@@ -326,7 +405,9 @@ impl ShapedText {
 
                 let mut vertical_for = |glyph_id: u32| {
                     let key = (*font_index, *vertical_features, glyph_id);
-                    let metrics = *metrics_cache.entry(key).or_insert_with(|| vertical_metrics(glyph_id));
+                    let metrics = *metrics_cache
+                        .entry(key)
+                        .or_insert_with(|| vertical_metrics(glyph_id));
                     metrics
                         .map(|(origin, advance)| (origin * font_size, advance * font_size))
                         .unwrap_or((fallback_origin, *font_size))
@@ -359,9 +440,10 @@ impl ShapedText {
                 }
             }
 
-            let cluster_slice = &self.shaped_clusters
-                [cluster_range.start as usize..cluster_range.end as usize];
-            self.runs[run_index].advance = cluster_slice.iter().map(|cluster| cluster.advance).sum();
+            let cluster_slice =
+                &self.shaped_clusters[cluster_range.start as usize..cluster_range.end as usize];
+            self.runs[run_index].advance =
+                cluster_slice.iter().map(|cluster| cluster.advance).sum();
         }
     }
 
@@ -1087,26 +1169,59 @@ mod tests {
     #[test]
     fn vertical_metrics_cache_distinguishes_width_features() {
         let path = r"D:\_git0\conformance\fonts\noto\cjk\NotoSansCJKjp-Regular-subset-halt.otf";
-        let Ok(bytes) = std::fs::read(path) else { return };
+        let Ok(bytes) = std::fs::read(path) else {
+            return;
+        };
         let font = FontInstance {
             font: FontData::new(Blob::new(Arc::new(bytes)), 0),
             synthesis: Synthesis::default(),
         };
-        let vert = parlance::FontFeature { tag: parlance::Tag::new(b"vert"), value: 1 };
-        let vhal = parlance::FontFeature { tag: parlance::Tag::new(b"vhal"), value: 1 };
+        let vert = parlance::FontFeature {
+            tag: parlance::Tag::new(b"vert"),
+            value: 1,
+        };
+        let vhal = parlance::FontFeature {
+            tag: parlance::Tag::new(b"vhal"),
+            value: 1,
+        };
         let plain = [vert];
         let half = [vert, vhal];
         let text = "（（";
         let mut shaped = ShapedText::new();
         Shaper::default().shape_text(
-            text, &analyze(text), &[0, 1],
-            [Item { char_end: 1, options: ShapeOptions { font_size: 20., features: &plain, language: None, variations: &[] } },
-             Item { char_end: 2, options: ShapeOptions { font_size: 20., features: &half, language: None, variations: &[] } }],
-            SingleFont(font), &mut shaped,
+            text,
+            &analyze(text),
+            &[0, 1],
+            [
+                Item {
+                    char_end: 1,
+                    options: ShapeOptions {
+                        font_size: 20.,
+                        features: &plain,
+                        language: None,
+                        variations: &[],
+                    },
+                },
+                Item {
+                    char_end: 2,
+                    options: ShapeOptions {
+                        font_size: 20.,
+                        features: &half,
+                        language: None,
+                        variations: &[],
+                    },
+                },
+            ],
+            SingleFont(font),
+            &mut shaped,
         );
         for _ in 0..2 {
             shaped.set_vertical_advances(text, parlance::TextOrientation::Upright);
-            let advances: Vec<_> = shaped.shaped_clusters().iter().map(|cluster| cluster.advance).collect();
+            let advances: Vec<_> = shaped
+                .shaped_clusters()
+                .iter()
+                .map(|cluster| cluster.advance)
+                .collect();
             assert_eq!(advances, [20., 10.]);
         }
     }

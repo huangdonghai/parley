@@ -11,6 +11,7 @@ pub(crate) mod shaped_text;
 pub(crate) mod shaper;
 
 pub use cluster::{Char, CharCluster, Coverage, SourceRange, Whitespace};
-pub use data::{Character, CharacterFlags, ShapedCluster, SpacingTrimClass};
+pub use data::{AutoSpaceClass, Character, CharacterFlags, ShapedCluster, SpacingTrimClass};
+pub use shaped_text::AutoSpaceStyle;
 
 pub(crate) use data::ShapedClusterFlags;

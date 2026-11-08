@@ -21,8 +21,8 @@ pub use font::{
 };
 pub use fontique::Language;
 pub use parlance::{
-    LineBreak, OverflowWrap, TextSpacingTrim, TextWrapMode, TrimAdjacent, TrimEnd, TrimStart,
-    WordBreak,
+    LineBreak, OverflowWrap, TextOrientation, TextSpacingTrim, TextWrapMode, TrimAdjacent, TrimEnd,
+    TrimStart, WordBreak,
 };
 pub use styleset::StyleSet;
 
@@ -44,6 +44,21 @@ pub enum WhiteSpaceCollapse {
     PreserveBreaks,
     /// Preserve whitespace without hanging, allowing wrapping after each space or tab.
     BreakSpaces,
+}
+
+/// CSS `text-autospace`.
+///
+/// Only the values the browsers accept are exposed: `normal` waits for a
+/// character-class calculation (CSS Text 4 §8.4), while `no-autospace` inserts
+/// no extra space. The finer value sets are left to the browser.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub enum TextAutospace {
+    /// The initial value: automatic spacing between adjacent characters.
+    #[default]
+    NoAutospace,
+    /// Insert an eighth of a CJK advance between adjacent characters of the
+    /// classes `text-autospace` names.
+    Normal,
 }
 
 /// The height that this text takes up. The default is `MetricsRelative(1.0)`, which is the given
@@ -272,6 +287,12 @@ pub enum StyleProperty<'a, B: Brush> {
     LetterSpacing(f32),
     /// CSS `text-spacing-trim`.
     TextSpacingTrim(TextSpacingTrim),
+    /// CSS `text-autospace`.
+    TextAutospace(TextAutospace),
+    /// CSS `text-orientation`.
+    TextOrientation(TextOrientation),
+    /// CSS `text-combine-upright`.
+    TextCombineUpright(bool),
     /// Control over where words can wrap.
     WordBreak(WordBreak),
     /// Strictness of line-breaking rules.
@@ -331,6 +352,12 @@ pub struct TextStyle<'family, 'settings, B: Brush> {
     pub letter_spacing: f32,
     /// CSS `text-spacing-trim`.
     pub text_spacing_trim: TextSpacingTrim,
+    /// CSS `text-autospace`.
+    pub text_autospace: TextAutospace,
+    /// CSS `text-orientation`.
+    pub text_orientation: TextOrientation,
+    /// CSS `text-combine-upright`.
+    pub text_combine_upright: bool,
     /// Control over where words can wrap.
     pub word_break: WordBreak,
     /// Strictness of line-breaking rules.
@@ -368,6 +395,9 @@ impl<B: Brush> Default for TextStyle<'static, 'static, B> {
             word_spacing: 0.0,
             letter_spacing: 0.0,
             text_spacing_trim: TextSpacingTrim::normal(),
+            text_autospace: TextAutospace::NoAutospace,
+            text_orientation: TextOrientation::Mixed,
+            text_combine_upright: false,
             word_break: WordBreak::default(),
             line_break: LineBreak::default(),
             overflow_wrap: OverflowWrap::default(),
@@ -410,6 +440,18 @@ impl<'a, B: Brush> From<FontFeatures<'a>> for StyleProperty<'a, B> {
 impl<B: Brush> From<TextSpacingTrim> for StyleProperty<'_, B> {
     fn from(value: TextSpacingTrim) -> Self {
         StyleProperty::TextSpacingTrim(value)
+    }
+}
+
+impl<B: Brush> From<TextAutospace> for StyleProperty<'_, B> {
+    fn from(value: TextAutospace) -> Self {
+        StyleProperty::TextAutospace(value)
+    }
+}
+
+impl<B: Brush> From<TextOrientation> for StyleProperty<'_, B> {
+    fn from(value: TextOrientation) -> Self {
+        StyleProperty::TextOrientation(value)
     }
 }
 

@@ -11,8 +11,8 @@ use core_maths::CoreFloat;
 use parlance::BidiLevel;
 
 use crate::layout::data::{AlignedSubtreeOffset, run_box_metrics};
-use crate::layout::spacing::{EffectiveSpacing, Justification, is_word_separator};
 use crate::layout::spacing::TrimLineContext;
+use crate::layout::spacing::{EffectiveSpacing, Justification, is_word_separator};
 use crate::layout::style_metrics::{
     BoxMetrics, InlineBoxPlacement, StyleMetrics, inline_box_placement,
 };
@@ -29,7 +29,7 @@ use crate::{
 
 use core::ops::Range;
 use parley_engine::Atom;
-use parley_engine::shape::{Character, SpacingTrimClass, Whitespace};
+use parley_engine::shape::{AutoSpaceClass, Character, SpacingTrimClass, Whitespace};
 use smallvec::SmallVec;
 
 #[derive(Default)]
@@ -90,6 +90,8 @@ struct LineState {
     last_text_cluster: Option<u32>,
     /// Trim class of the last text atom appended, for end-of-line handling at commit.
     last_text_class: SpacingTrimClass,
+    /// `text-autospace` class of the last text atom appended, for adjacent spacing.
+    last_text_autospace_class: Option<AutoSpaceClass>,
     /// `text-spacing-trim` policy of the last text atom's run.
     last_text_trim: crate::TextSpacingTrim,
     /// Whether the last text atom triggers adjacent collapsing for the next atom.
@@ -107,6 +109,7 @@ impl LineState {
         self.first_text_cluster = None;
         self.last_text_cluster = None;
         self.last_text_class = SpacingTrimClass::Other;
+        self.last_text_autospace_class = None;
         self.last_text_trim = crate::TextSpacingTrim::space_all();
         self.last_text_trigger = false;
         self.end_trimmed = false;
@@ -720,12 +723,18 @@ impl BreakerState {
         }
         self.line.last_text_cluster = Some(range.end);
         self.line.last_text_class = atom.characters()[0].flags.spacing_trim_class();
+        self.line.last_text_autospace_class =
+            Some(crate::layout::spacing::effective_auto_space_class(
+                &atom.characters()[0],
+                data.vertical,
+            ));
         let run_index = data.items[self.item_idx].index;
         self.line.last_text_trim = data.runs[run_index].spacing.text_spacing_trim();
         self.line.last_text_trigger = matches!(
             self.line.last_text_class,
             SpacingTrimClass::Opening | SpacingTrimClass::Closing | SpacingTrimClass::MiddleDot
-        ) || atom.characters()[0].whitespace == Whitespace::IdeographicSpace;
+        ) || atom.characters()[0].whitespace
+            == Whitespace::IdeographicSpace;
         self.line.num_word_separators += u32::from(is_word_separator);
         self.line.box_metrics.add_text(
             self.item_idx,
@@ -747,6 +756,7 @@ impl BreakerState {
     pub fn append_inline_box_to_line(&mut self, next_x: f32, ascent: f32, descent: f32) {
         self.item_idx += 1;
         self.line.items.end += 1;
+        self.line.last_text_autospace_class = None;
         self.line.x = next_x;
         self.line
             .box_metrics
@@ -1257,6 +1267,7 @@ impl<'a, B: Brush> BreakLines<'a, B> {
                             end_unknown: true,
                             prev_trigger: self.state.line.last_text_trigger,
                             next_trigger: false,
+                            prev_autospace: self.state.line.last_text_autospace_class,
                         });
                         let advance = atom_spacing.atom_advance(&atom);
 
@@ -1299,6 +1310,7 @@ impl<'a, B: Brush> BreakLines<'a, B> {
                                     end_unknown: false,
                                     prev_trigger: self.state.line.last_text_trigger,
                                     next_trigger: false,
+                                    prev_autospace: self.state.line.last_text_autospace_class,
                                 };
                                 let trimmed_next_x = self.state.line.x
                                     + spacing.with_trim_line(end_ctx).atom_advance(&atom);

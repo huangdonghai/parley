@@ -45,7 +45,8 @@ pub use crate::editing::{Cursor, Selection};
 
 use crate::style::Brush;
 use crate::{
-    LineHeight, OverflowWrap, TextSpacingTrim, TextWrapMode, VerticalAlign, WhiteSpaceCollapse,
+    LineHeight, OverflowWrap, TextAutospace, TextSpacingTrim, TextWrapMode, VerticalAlign,
+    WhiteSpaceCollapse,
 };
 
 /// Style properties.
@@ -72,6 +73,8 @@ pub struct Style<B: Brush> {
     pub(crate) white_space_collapse: WhiteSpaceCollapse,
     /// CSS `text-spacing-trim`.
     pub(crate) text_spacing_trim: TextSpacingTrim,
+    /// CSS `text-autospace`.
+    pub(crate) text_autospace: TextAutospace,
     /// The locale of the text, if any.
     ///
     /// This is useful for consumers exposing the text to assistive technologies,

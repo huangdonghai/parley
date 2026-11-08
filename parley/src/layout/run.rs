@@ -133,6 +133,7 @@ impl<'a, B: Brush> Run<'a, B> {
                 || self.layout.data.lines[self.line_index as usize - 1].break_reason
                     == BreakReason::Explicit;
             let (prev_trigger, next_trigger) = self.adjacent_triggers(line);
+            let prev_autospace = self.prev_autospace(line);
             (
                 line.justification,
                 TrimLineContext {
@@ -143,12 +144,45 @@ impl<'a, B: Brush> Run<'a, B> {
                     end_unknown: false,
                     prev_trigger,
                     next_trigger,
+                    prev_autospace,
                 },
             )
         } else {
             (Justification::NONE, TrimLineContext::NONE)
         };
         EffectiveSpacing::new(self.data.spacing, justification).with_trim_line(trim_line)
+    }
+
+    /// The `text-autospace` class of the preceding text on this line, if that boundary
+    /// remains between two text atoms rather than an inline box.
+    fn prev_autospace(
+        &self,
+        line: &crate::layout::LineData,
+    ) -> Option<parley_engine::shape::AutoSpaceClass> {
+        use crate::layout::LayoutItemKind;
+        use crate::layout::spacing::effective_auto_space_class;
+
+        let items = &self.layout.data.line_items[line.item_range.clone()];
+        let position = items.iter().position(|item| {
+            item.kind == LayoutItemKind::TextRun
+                && item.index == self.shaped_text_run_index as usize
+        })?;
+        let item = &items[..position].last()?;
+        if item.kind != LayoutItemKind::TextRun {
+            return None;
+        }
+        let atom = self
+            .layout
+            .data
+            .shaped_text
+            .run_slice(item.index as u32)
+            .narrow(item.shaped_cluster_range.clone())
+            .atoms_end()
+            .prev()?;
+        Some(effective_auto_space_class(
+            &atom.characters()[0],
+            self.layout.data.vertical,
+        ))
     }
 
     /// Whether the neighboring text runs on this line trigger adjacent collapsing.

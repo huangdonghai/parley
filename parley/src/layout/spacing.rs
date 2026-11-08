@@ -5,10 +5,10 @@
 
 use parley_engine::{
     Atom, Grapheme, ShapedSlice,
-    shape::{SpacingTrimClass, Whitespace},
+    shape::{AutoSpaceClass, Character, SpacingTrimClass, Whitespace},
 };
 
-use crate::TextSpacingTrim;
+use crate::{TextAutospace, TextSpacingTrim};
 
 /// Whether the whitespace is a word separator.
 ///
@@ -90,6 +90,11 @@ pub(crate) struct Spacing {
     pub(crate) letter: f32,
     /// CSS `text-spacing-trim`.
     pub(crate) text_spacing_trim: TextSpacingTrim,
+    /// CSS `text-autospace`.
+    pub(crate) text_autospace: TextAutospace,
+    /// The amount `text-autospace` adds in horizontal and vertical writing modes.
+    pub(crate) autospace_advance_horizontal: f32,
+    pub(crate) autospace_advance_vertical: f32,
     /// The run's font size, used to tell half-width (already trimmed or
     /// proportional) punctuation glyphs apart from full-width ones: such glyphs
     /// must not be trimmed again (CSS Text 4 8.5.1).
@@ -111,9 +116,35 @@ impl Spacing {
             word,
             letter,
             text_spacing_trim,
+            text_autospace: TextAutospace::NoAutospace,
+            autospace_advance_horizontal: 0.0,
+            autospace_advance_vertical: 0.0,
             font_size,
             width_features: [false; 2],
             vertical: false,
+        }
+    }
+
+    /// Set whether this run uses `text-autospace`, and the width it adds.
+    pub(crate) const fn with_autospace(
+        mut self,
+        text_autospace: TextAutospace,
+        horizontal: f32,
+        vertical: f32,
+    ) -> Self {
+        self.text_autospace = text_autospace;
+        self.autospace_advance_horizontal = horizontal;
+        self.autospace_advance_vertical = vertical;
+        self
+    }
+
+    /// The width `text-autospace` adds at the next boundary.
+    #[inline(always)]
+    pub(crate) fn autospace_width(self) -> f32 {
+        if self.vertical {
+            self.autospace_advance_vertical
+        } else {
+            self.autospace_advance_horizontal
         }
     }
 
@@ -137,6 +168,13 @@ impl Spacing {
     pub(crate) const fn is_zero(self) -> bool {
         self.word == 0.
             && self.letter == 0.
+            && match self.text_autospace {
+                TextAutospace::NoAutospace => true,
+                TextAutospace::Normal => {
+                    (self.vertical && self.autospace_advance_vertical == 0.0)
+                        || (!self.vertical && self.autospace_advance_horizontal == 0.0)
+                }
+            }
             && matches!(
                 self.text_spacing_trim(),
                 TextSpacingTrim::Auto
@@ -192,6 +230,8 @@ pub(crate) struct TrimLineContext {
     pub(crate) prev_trigger: bool,
     /// Whether the following atom on this line triggers adjacent collapsing.
     pub(crate) next_trigger: bool,
+    /// The `text-autospace` class of the preceding text on this line.
+    pub(crate) prev_autospace: Option<AutoSpaceClass>,
 }
 
 impl TrimLineContext {
@@ -204,6 +244,7 @@ impl TrimLineContext {
         end_unknown: false,
         prev_trigger: false,
         next_trigger: false,
+        prev_autospace: None,
     };
 }
 
@@ -275,8 +316,8 @@ impl EffectiveSpacing {
 
         // Justification expands word separators and, for scripts that do not separate words with
         // spaces, the boundary between two typographic character units (CSS Text 3 6.4.5).
-        let is_justification_opportunity = is_word_separator(whitespace)
-            || atom.characters()[0].flags.is_cjk_typographic();
+        let is_justification_opportunity =
+            is_word_separator(whitespace) || atom.characters()[0].flags.is_cjk_typographic();
         if is_justification_opportunity
             && atom.shaped_clusters_range().end <= self.justification.justification_end_cluster
         {
@@ -343,6 +384,24 @@ impl EffectiveSpacing {
                         SpacingTrimClass::Other => {}
                     }
                 }
+            }
+        }
+
+        if self.spacing.text_autospace == TextAutospace::Normal {
+            let previous = atom
+                .cursor_before()
+                .prev()
+                .map(|previous| {
+                    effective_auto_space_class(&previous.characters()[0], self.spacing.vertical)
+                })
+                .or(self.trim_line.prev_autospace);
+            let Some(previous) = previous else {
+                return gaps;
+            };
+
+            let current = effective_auto_space_class(&atom.characters()[0], self.spacing.vertical);
+            if separates_autospace(previous, current) {
+                gaps.before += self.spacing.autospace_width();
             }
         }
 
@@ -438,6 +497,29 @@ impl EffectiveSpacing {
 #[inline(always)]
 fn atom_trim_class(atom: &Atom<'_>) -> SpacingTrimClass {
     atom.characters()[0].flags.spacing_trim_class()
+}
+
+/// A neighbour's `text-autospace` class in vertical writing.
+///
+/// A non-ideographic character set upright is not a neighbour the property spaces.
+#[inline(always)]
+pub(crate) fn effective_auto_space_class(character: &Character, vertical: bool) -> AutoSpaceClass {
+    let class = character.flags.auto_space_class();
+    if class == AutoSpaceClass::NonIdeograph && vertical && character.flags.is_auto_space_upright()
+    {
+        AutoSpaceClass::Other
+    } else {
+        class
+    }
+}
+
+#[inline(always)]
+fn separates_autospace(left: AutoSpaceClass, right: AutoSpaceClass) -> bool {
+    matches!(
+        (left, right),
+        (AutoSpaceClass::Ideograph, AutoSpaceClass::NonIdeograph)
+            | (AutoSpaceClass::NonIdeograph, AutoSpaceClass::Ideograph)
+    )
 }
 
 /// Whether `advance` is (approximately) the font's fullwidth advance.

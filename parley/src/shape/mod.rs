@@ -5,7 +5,7 @@
 //! and `icu` for text analysis.
 
 use alloc::vec::Vec;
-use parley_engine::shape::{CharCluster, Coverage};
+use parley_engine::shape::{AutoSpaceStyle, CharCluster, Coverage};
 use parley_engine::{
     Analysis, AnalysisDataSources, FontInstance, FontInstanceRef, ShapeOptions, Shaper,
 };
@@ -82,7 +82,9 @@ pub(crate) fn shape_text<'a, B: Brush>(
         // Process any remaining inline boxes whose index is greater than the length of the text
         for box_idx in 0..inline_boxes.len() {
             // Push the box to the list of items
-            layout.data.push_inline_box(box_idx, box_bidi_levels[box_idx]);
+            layout
+                .data
+                .push_inline_box(box_idx, box_bidi_levels[box_idx]);
         }
         return;
     }
@@ -218,10 +220,9 @@ pub(crate) fn shape_text<'a, B: Brush>(
                 .zip(characters.iter_mut().zip(char_style_indices.iter()))
             {
                 let _ = char_index;
-                let Some(class) = locale_trim_class(
-                    ch,
-                    styles[usize::from(*style_index)].locale.as_ref(),
-                ) else {
+                let Some(class) =
+                    locale_trim_class(ch, styles[usize::from(*style_index)].locale.as_ref())
+                else {
                     continue;
                 };
                 character.flags.set_spacing_trim_class(class);
@@ -238,6 +239,21 @@ pub(crate) fn shape_text<'a, B: Brush>(
         .shaped_text
         .resolve_trim_classes(text, layout.data.vertical);
 
+    // `text-autospace` reads one class per typographic unit; classify it once
+    // here so line breaking and painting pay only packed-flag reads.
+    let auto_space_styles: Vec<AutoSpaceStyle> = styles
+        .iter()
+        .map(|style| AutoSpaceStyle {
+            enabled: matches!(style.text_autospace, crate::TextAutospace::Normal),
+            orientation: style.text_orientation,
+            combined: style.text_combine_upright,
+        })
+        .collect();
+    layout
+        .data
+        .shaped_text
+        .set_autospace_classes(text, &auto_space_styles);
+
     let mut inline_box_iter = inline_boxes
         .iter()
         .map(|b| &b.inline_box)
@@ -248,11 +264,22 @@ pub(crate) fn shape_text<'a, B: Brush>(
         let run_text_byte_start = shaped_run.range.byte_range.start;
         let run_style_index = char_style_indices[shaped_run.range.char_range.start];
         let run_style = &styles[usize::from(run_style_index)];
+        let (autospace_horizontal, autospace_vertical) =
+            if run_style.text_autospace == crate::TextAutospace::Normal {
+                layout
+                    .data
+                    .shaped_text
+                    .ideograph_advance(shaped_run.font_index, shaped_run.font_size)
+            } else {
+                (0.0, 0.0)
+            };
 
         // Push inline boxes positioned before the start of this item.
         while let Some((box_idx, inline_box)) = inline_box_iter.peek() {
             if inline_box.index <= run_text_byte_start {
-                layout.data.push_inline_box(*box_idx, box_bidi_levels[*box_idx]);
+                layout
+                    .data
+                    .push_inline_box(*box_idx, box_bidi_levels[*box_idx]);
                 inline_box_iter.next();
             } else {
                 break;
@@ -273,6 +300,11 @@ pub(crate) fn shape_text<'a, B: Brush>(
                 run_style.text_spacing_trim,
                 run_style.font_size,
             )
+            .with_autospace(
+                run_style.text_autospace,
+                autospace_horizontal * 0.125,
+                autospace_vertical * 0.125,
+            )
             .with_width_features(
                 overrides_spacing_trim(&style_features[run_style_index as usize], false),
                 overrides_spacing_trim(&style_features[run_style_index as usize], true),
@@ -283,7 +315,9 @@ pub(crate) fn shape_text<'a, B: Brush>(
 
     // Process any remaining inline boxes whose index is greater than the length of the text.
     for (box_idx, _inline_box) in inline_box_iter {
-        layout.data.push_inline_box(box_idx, box_bidi_levels[box_idx]);
+        layout
+            .data
+            .push_inline_box(box_idx, box_bidi_levels[box_idx]);
     }
 }
 
@@ -312,21 +346,17 @@ fn locale_trim_class(ch: char, locale: Option<&parlance::Language>) -> Option<Sp
     match ch {
         // Fullwidth colon/semicolon: closing for Simplified Chinese,
         // middle-dot for Traditional Chinese, Korean, and Japanese.
-        '\u{FF1A}' | '\u{FF1B}' => Some(
-            if lang == Some("ja") || lang == Some("ko") || is_hant {
-                SpacingTrimClass::MiddleDot
-            } else {
-                SpacingTrimClass::Closing
-            },
-        ),
+        '\u{FF1A}' | '\u{FF1B}' => Some(if lang == Some("ja") || lang == Some("ko") || is_hant {
+            SpacingTrimClass::MiddleDot
+        } else {
+            SpacingTrimClass::Closing
+        }),
         // Fullwidth dot punctuation: closing except for Traditional Chinese.
-        '\u{3001}' | '\u{3002}' | '\u{FF0C}' | '\u{FF0E}' => Some(
-            if is_hant {
-                SpacingTrimClass::MiddleDot
-            } else {
-                SpacingTrimClass::Closing
-            },
-        ),
+        '\u{3001}' | '\u{3002}' | '\u{FF0C}' | '\u{FF0E}' => Some(if is_hant {
+            SpacingTrimClass::MiddleDot
+        } else {
+            SpacingTrimClass::Closing
+        }),
         _ => None,
     }
 }

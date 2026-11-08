@@ -344,12 +344,13 @@ impl<'a, B: Brush> GlyphRun<'a, B> {
         }
         let line = &self.run.layout.data.lines[self.run.line_index as usize];
         let slice = self.run.full_slice();
+        let spacing = self.run.line_spacing();
         let advance_at = |cluster: u32| {
             if self.shaped_clusters.contains(&cluster) {
                 slice
                     .atoms_from(cluster)
                     .next()
-                    .map_or(0.0, |atom| atom.advance())
+                    .map_or(0.0, |atom| spacing.trimmed_advance(&atom))
             } else {
                 0.0
             }

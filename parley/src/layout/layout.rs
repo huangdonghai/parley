@@ -265,7 +265,7 @@ impl<B: Brush> Layout<B> {
     /// If line-specific `offset` and `max_advance` are set using the advanced methods on the `BreakLines`
     /// struct then each line will be aligned individually within its line box.
     pub fn align(&mut self, alignment: Alignment, options: AlignmentOptions) {
-        align(&mut self.data, alignment, options);
+        align(self, alignment, options);
     }
 
     /// Returns the index and `Line` object for the line containing the

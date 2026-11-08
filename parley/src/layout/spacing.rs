@@ -337,47 +337,7 @@ impl EffectiveSpacing {
     pub(crate) fn gaps(self, atom: &Atom<'_>) -> Gaps {
         let whitespace = atom.characters()[0].whitespace;
         let mut gaps = self.spacing.gaps(whitespace);
-        let hanging_class = atom.characters()[0].flags.hanging_punctuation_class();
         let range = atom.shaped_clusters_range();
-        let is_hanging_punctuation = self.trim_line.first_punctuation_hanging_cluster
-            == Some(range.start)
-            || self.trim_line.last_punctuation_hanging_cluster == Some(range.start);
-        // `before` is the visually left (top in vertical) side and `after` the visually
-        // right one; the hanging edge is the line's start or end edge, which is the
-        // visually right one in RTL text and the left one otherwise.
-        if self.trim_line.first_punctuation_hanging_cluster == Some(range.start)
-            && matches!(
-                hanging_class,
-                parley_engine::shape::HangingPunctuationClass::Opening
-                    | parley_engine::shape::HangingPunctuationClass::AmbiguousQuote
-            )
-        {
-            if self.trim_line.line_is_rtl {
-                gaps.after = -atom.advance();
-            } else {
-                gaps.before = -atom.advance();
-            }
-        }
-        if self.trim_line.last_punctuation_hanging_cluster == Some(range.start)
-            && matches!(
-                hanging_class,
-                parley_engine::shape::HangingPunctuationClass::StopOrComma
-                    | parley_engine::shape::HangingPunctuationClass::Closing
-                    | parley_engine::shape::HangingPunctuationClass::AmbiguousQuote
-            )
-        {
-            // In RTL text the hanging glyph is the visually first atom on the line,
-            // so shifting it by a negative gap would also pull every atom after it
-            // along. At paint time it needs no gap: the line offset already places
-            // it past the line's end edge, and its own width carries the atoms after
-            // it to the line's edge. Only the measuring path subtracts it.
-            if self.trim_line.line_is_rtl && self.trim_line.hanging_for_paint {
-                gaps.before = 0.0;
-                gaps.after = 0.0;
-            } else {
-                gaps.after = -atom.advance();
-            }
-        }
 
         // Justification expands word separators and, for scripts that do not separate words with
         // spaces, the boundary between two typographic character units (CSS Text 3 6.4.5).
@@ -394,11 +354,86 @@ impl EffectiveSpacing {
             gaps.after += self.justification.amount_per_opportunity;
         }
 
+        self.apply_text_spacing_trim(atom, &mut gaps);
+
+        // A hanging glyph still takes the trimmed glyph shape: `text-spacing-trim`
+        // applies at the line edge just as it does elsewhere (CSS Text 4 §8.5).
+        // The character advance that becomes a negative margin is therefore the
+        // trimmed one, not the punctuation's full-width advance (CSS Text 3 §8.2).
+        let hanging_class = atom.characters()[0].flags.hanging_punctuation_class();
+        if self.trim_line.first_punctuation_hanging_cluster == Some(range.start)
+            && matches!(
+                hanging_class,
+                parley_engine::shape::HangingPunctuationClass::Opening
+                    | parley_engine::shape::HangingPunctuationClass::AmbiguousQuote
+            )
+        {
+            let advance = self.trimmed_advance(atom);
+            if self.trim_line.line_is_rtl {
+                gaps.after -= advance;
+            } else {
+                gaps.before -= advance;
+            }
+        }
+        if self.trim_line.last_punctuation_hanging_cluster == Some(range.start)
+            && matches!(
+                hanging_class,
+                parley_engine::shape::HangingPunctuationClass::StopOrComma
+                    | parley_engine::shape::HangingPunctuationClass::Closing
+                    | parley_engine::shape::HangingPunctuationClass::AmbiguousQuote
+            )
+        {
+            // In RTL text the hanging glyph is the visually first atom on the line,
+            // so shifting it by a negative gap would also pull every atom after it
+            // along. At paint time it needs no gap: the line offset already places
+            // it past the line's end edge, and its own trimmed width carries the
+            // atoms after it to the line's edge. Only the measuring path subtracts it.
+            if self.trim_line.line_is_rtl && self.trim_line.hanging_for_paint {
+                // Keep the trim gaps so the painted run still covers the glyph.
+            } else {
+                gaps.after -= self.trimmed_advance(atom);
+            }
+        }
+
+        if self.spacing.text_autospace == TextAutospace::Normal {
+            let previous = atom
+                .cursor_before()
+                .prev()
+                .map(|previous| {
+                    effective_auto_space_class(&previous.characters()[0], self.spacing.vertical)
+                })
+                .or(self.trim_line.prev_autospace);
+            let Some(previous) = previous else {
+                return gaps;
+            };
+
+            let current = effective_auto_space_class(&atom.characters()[0], self.spacing.vertical);
+            if separates_autospace(previous, current) {
+                gaps.before += self.spacing.autospace_width();
+            }
+        }
+
+        gaps
+    }
+
+    /// The atom's advance after `text-spacing-trim`, but before justification,
+    /// text-autospace, and hanging.
+    ///
+    /// This is the advance a hanging glyph gives up at the line edge, and what a
+    /// hanging glyph's painted run still covers.
+    pub(crate) fn trimmed_advance(self, atom: &Atom<'_>) -> f32 {
+        let mut gaps = self.spacing.gaps(atom.characters()[0].whitespace);
+        self.apply_text_spacing_trim(atom, &mut gaps);
+        atom.advance() + gaps.total()
+    }
+
+    /// Apply the punctuation half-width adjustments of `text-spacing-trim` to `gaps`.
+    fn apply_text_spacing_trim(self, atom: &Atom<'_>, gaps: &mut Gaps) {
         let trim = self.spacing.text_spacing_trim();
-        if trim.trims_all() && !is_hanging_punctuation {
+        if trim.trims_all() {
             let advance = atom.advance();
             if !is_fullwidth(advance, self.spacing.font_size) {
-                return gaps;
+                return;
             }
             match atom.characters()[0].flags.spacing_trim_class() {
                 SpacingTrimClass::Opening => gaps.before -= advance / 2.,
@@ -456,26 +491,6 @@ impl EffectiveSpacing {
                 }
             }
         }
-
-        if self.spacing.text_autospace == TextAutospace::Normal {
-            let previous = atom
-                .cursor_before()
-                .prev()
-                .map(|previous| {
-                    effective_auto_space_class(&previous.characters()[0], self.spacing.vertical)
-                })
-                .or(self.trim_line.prev_autospace);
-            let Some(previous) = previous else {
-                return gaps;
-            };
-
-            let current = effective_auto_space_class(&atom.characters()[0], self.spacing.vertical);
-            if separates_autospace(previous, current) {
-                gaps.before += self.spacing.autospace_width();
-            }
-        }
-
-        gaps
     }
 
     /// Whether this atom should be set half-width at its position on the line.

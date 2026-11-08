@@ -7,7 +7,10 @@ use crate::test_name;
 use crate::util::{ColorBrush, TestEnv, samples};
 use parley::layout::Alignment;
 use parley::style::{FontFamily, LineHeight, StyleProperty};
-use parley::{AlignmentOptions, Layout, TextOrientation, TextSpacingTrim};
+use parley::{
+    AlignmentOptions, HangingPunctuation, Layout, PositionedLayoutItem, TextOrientation,
+    TextSpacingTrim,
+};
 
 /// Helper to build a layout with line height applied
 fn build_with_line_height(
@@ -308,6 +311,58 @@ fn text_spacing_trim_space_all_never_trims() {
     for (before, after) in spacing_sides(&layout) {
         assert_eq!((before, after), (0., 0.));
     }
+}
+
+#[test]
+fn hanging_punctuation_gives_up_its_trimmed_advance() {
+    let mut env = TestEnv::new(test_name!(), None);
+    let text = "国。";
+    let mut builder = env.ranged_builder(text);
+    builder.push_default(StyleProperty::FontFamily(FontFamily::named(
+        "Noto Sans CJK SC",
+    )));
+    builder.push_default(StyleProperty::TextSpacingTrim(TextSpacingTrim::TrimAll));
+    builder.push_default(StyleProperty::HangingPunctuation(
+        HangingPunctuation::FORCE_END,
+    ));
+    let mut layout = builder.build(text);
+    layout.set_vertical(true);
+    layout.break_all_lines(Some(200.0));
+
+    let line = layout.get(0).unwrap();
+    let mut stop = None;
+    let mut hanging = None;
+    for item in line.items() {
+        let PositionedLayoutItem::GlyphRun(run) = item else {
+            continue;
+        };
+        for cluster in run.clusters() {
+            if cluster.text_range().start == "国".len() {
+                stop = Some(cluster);
+                hanging = Some(run.hanging_punctuation_advance().1);
+            }
+        }
+    }
+
+    let stop = stop.expect("the stop");
+    let hanging = hanging.expect("the hanging stop's run");
+    let half = stop.shaped_advance() / 2.;
+    assert!(
+        (hanging - half).abs() < 0.01,
+        "a hung stop must give up its trimmed advance ({hanging}), not its full-width one ({})",
+        stop.shaped_advance()
+    );
+    let body = line
+        .runs()
+        .flat_map(|run| run.clusters())
+        .find(|cluster| cluster.text_range().start == 0)
+        .expect("the first character")
+        .advance();
+    let laid_out_body = line.metrics().advance - line.metrics().hanging_advance;
+    assert!(
+        (laid_out_body - body).abs() < 0.01,
+        "the line minus the hung advance must be the body advance ({laid_out_body} vs {body})"
+    );
 }
 
 // ============================================================================

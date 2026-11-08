@@ -98,6 +98,9 @@ struct LineState {
     last_text_hanging_class: Option<HangingPunctuationClass>,
     last_text_hanging_advance: f32,
     last_text_hanging_cluster: Option<u32>,
+    /// Shaped run holding `last_text_hanging_cluster`, for the trim-aware advance
+    /// once the line end is known.
+    last_text_run_index: Option<u32>,
     last_hanging_cluster: Option<u32>,
     last_text_hanging_style: crate::HangingPunctuation,
     end_hanging: bool,
@@ -140,6 +143,7 @@ impl LineState {
         self.last_text_hanging_class = None;
         self.last_text_hanging_advance = 0.0;
         self.last_text_hanging_cluster = None;
+        self.last_text_run_index = None;
         self.last_hanging_cluster = None;
         self.last_text_hanging_style = crate::HangingPunctuation::NONE;
         self.end_hanging = false;
@@ -792,6 +796,7 @@ impl BreakerState {
             self.line.last_text_hanging_style =
                 data.styles[style_index as usize].hanging_punctuation;
             let run_index = data.items[self.item_idx].index;
+            self.line.last_text_run_index = Some(run_index as u32);
             let run_range = data.shaped_text.runs()[run_index]
                 .shaped_clusters_range
                 .clone();
@@ -833,6 +838,7 @@ impl BreakerState {
         if next_x > self.line.x {
             self.line.last_text_hanging_class = None;
             self.line.last_text_hanging_advance = 0.0;
+            self.line.last_text_run_index = None;
         }
         self.line.last_text_autospace_class = None;
         self.line.x = next_x;
@@ -1411,7 +1417,8 @@ impl<'a, B: Brush> BreakLines<'a, B> {
                             );
                             if let Some(start) = hanging_start_cluster {
                                 self.state.line.first_hanging_cluster = Some(start);
-                                self.state.line.first_hanging_advance = atom.advance();
+                                self.state.line.first_hanging_advance =
+                                    atom_spacing.trimmed_advance(&atom);
                             }
                         }
                         // Else we attempt to line break:
@@ -1479,8 +1486,7 @@ impl<'a, B: Brush> BreakLines<'a, B> {
                                 };
                                 let hanging_next_x = self.state.line.x
                                     + spacing.with_trim_line(end_ctx).atom_advance(&atom);
-                                if self.state.line.x <= max_advance
-                                    && hanging_next_x <= max_advance
+                                if self.state.line.x <= max_advance && hanging_next_x <= max_advance
                                 {
                                     if max_height_exceeded {
                                         return self.max_height_break_data(line_height);
@@ -2393,14 +2399,11 @@ fn commit_line<B: Brush>(
     }
 
     // The breaker sets `end_hanging` when it keeps an overflowing glyph on the
-    // line by hanging it; its `state.x` then already excludes the glyph, so
-    // there is nothing more to subtract from the line's advance here.
-    // The breaker sets `end_hanging` when it keeps an overflowing glyph on the
     // line by hanging it; its `state.x` then already excludes the glyph, and
     // restoring it keeps the metric contract that `advance` includes every
     // hanging glyph so widths subtract it once.
     let breaker_hung = state.end_hanging;
-    let hanging_punctuation_advance = if state.last_text_hanging_class.is_some_and(|class| {
+    let hangs = if state.last_text_hanging_class.is_some_and(|class| {
         matches!(
             class,
             HangingPunctuationClass::StopOrComma
@@ -2426,25 +2429,43 @@ fn commit_line<B: Brush>(
         // here (CSS Text 3 §8.2.1); at wrap points the inset is only on the
         // element's last fragment, which this finish-line check narrows to atoms
         // that end their run.
-        let hangs = hangs && !(state.last_text_hanging_blocked && state.last_text_hanging_run_end);
-        if breaker_hung || hangs {
-            state.last_text_hanging_advance
-        } else {
-            0.0
-        }
+        hangs && !(state.last_text_hanging_blocked && state.last_text_hanging_run_end)
+    } else {
+        false
+    };
+    let end_hanging = breaker_hung || hangs;
+
+    // `text-spacing-trim` applies to the hanging glyph itself, so the advance
+    // turned into a negative margin is the trimmed one, not the full-width one.
+    let trimmed_hanging_advance = if end_hanging {
+        state
+            .last_text_run_index
+            .zip(state.last_text_hanging_cluster)
+            .and_then(|(run_index, cluster)| {
+                hanging_advance_after_trim(layout, run_index, cluster, state.end_trimmed)
+            })
+            .unwrap_or(state.last_text_hanging_advance)
     } else {
         0.0
     };
     // A line the breaker kept its last glyph hanging on was appended (and has
     // its `state.x` measured) without the glyph. Restoring it here keeps the
     // metric contract that `advance` includes every hanging glyph exactly once.
+    // A glyph the breaker measured normally is already in `state.x`; when trim
+    // changes its advance after the line end is known, replace that measurement.
+    let measured_hanging_advance = if state.last_text_trim.trims_all() {
+        trimmed_hanging_advance
+    } else {
+        state.last_text_hanging_advance
+    };
     let advance = state.x
         + if breaker_hung {
-            state.last_text_hanging_advance
+            trimmed_hanging_advance
+        } else if end_hanging {
+            trimmed_hanging_advance - measured_hanging_advance
         } else {
             0.0
         };
-    let end_hanging = breaker_hung || hanging_punctuation_advance != 0.0;
     // Neither a hung glyph nor the seam into it is room that justification
     // may spread into the margin (CSS Text 3 §8.2.1). Once either end is
     // settled, the line's opportunity count has to match the gaps that are
@@ -2488,7 +2509,7 @@ fn commit_line<B: Brush>(
         metrics: LineMetrics {
             indent: line_indent,
             advance,
-            hanging_advance: hanging_advance + hanging_punctuation_advance,
+            hanging_advance: hanging_advance + trimmed_hanging_advance,
             start_hanging_advance: state.first_hanging_advance,
             ..Default::default()
         },
@@ -2511,6 +2532,40 @@ fn commit_line<B: Brush>(
         // the first item of line N+1 to be the item AFTER the last item in line N.
         LayoutItemKind::InlineBox => state.items.end,
     };
+}
+
+/// The advance of the line's last hanging atom after `text-spacing-trim`.
+///
+/// The line end was unknown when the breaker measured the atom, so this runs the
+/// trim decision again now that the atom is known to be the line's last.
+fn hanging_advance_after_trim<B: Brush>(
+    layout: &Layout<B>,
+    run_index: u32,
+    cluster: u32,
+    end_trimmed: bool,
+) -> Option<f32> {
+    let slice = layout.data.shaped_text.run_slice(run_index);
+    let atom = slice.atoms_from(cluster).next()?;
+    let trim_line = TrimLineContext {
+        first_cluster: None,
+        last_cluster: Some(atom.shaped_clusters_range().end),
+        first_line: false,
+        line_is_rtl: layout.data.base_level.is_rtl(),
+        hanging_for_paint: false,
+        end_trimmed,
+        end_unknown: false,
+        prev_trigger: false,
+        next_trigger: false,
+        prev_autospace: None,
+        first_punctuation_hanging_cluster: None,
+        last_punctuation_hanging_cluster: None,
+    };
+    let spacing = layout.data.runs[run_index as usize].spacing;
+    Some(
+        EffectiveSpacing::new(spacing, Justification::NONE)
+            .with_trim_line(trim_line)
+            .trimmed_advance(&atom),
+    )
 }
 
 /// Returns the advance of the whitespace hanging past the end of the line made up of `line_items`,

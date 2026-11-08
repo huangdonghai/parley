@@ -1,9 +1,11 @@
 // Copyright 2024 the Parley Authors
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
-use super::BreakReason;
-use crate::data::LayoutData;
+use super::{BreakReason, Line, PositionedLayoutItem};
+use crate::InlineBoxKind;
+use crate::Layout;
 use crate::style::Brush;
+use alloc::vec::Vec;
 
 /// Alignment of a layout.
 #[derive(Copy, Clone, Default, PartialEq, Eq, Debug)]
@@ -67,17 +69,59 @@ impl Default for AlignmentOptions {
 
 /// Align the layout.
 pub(crate) fn align<B: Brush>(
-    layout: &mut LayoutData<B>,
+    layout: &mut Layout<B>,
     alignment: Alignment,
     options: AlignmentOptions,
 ) {
-    layout.alignment = Some(alignment);
+    layout.data.alignment = Some(alignment);
 
-    let is_rtl = layout.base_level.is_rtl();
+    let is_rtl = layout.data.base_level.is_rtl();
+    for line in &mut layout.data.lines {
+        line.justification.amount_per_opportunity = 0.;
+        line.metrics.offset = 0.;
+    }
+    // The breaker's running x does not include every contextual spacing
+    // adjustment (notably interior text-spacing-trim), while the painted runs
+    // do. Reconstruct the unpainted line advance from those runs so
+    // justification distributes only the room that actually remains.
+    let visual_advances: Vec<Option<f32>> = {
+        let layout_ref: &Layout<B> = layout;
+        (0..layout_ref.data.lines.len())
+            .map(|index| {
+                let data = &layout_ref.data.lines[index];
+                if is_rtl || !data.end_hanging {
+                    return None;
+                }
+                let line = Line {
+                    layout: layout_ref,
+                    index: index as u32,
+                    data,
+                };
+                let mut advance = 0.0;
+                for item in line.items() {
+                    match item {
+                        PositionedLayoutItem::GlyphRun(run) => advance += run.advance(),
+                        PositionedLayoutItem::InlineBox(inline_box)
+                            if matches!(
+                                inline_box.kind,
+                                InlineBoxKind::InFlow | InlineBoxKind::InlineEdge
+                            ) =>
+                        {
+                            advance += inline_box.width;
+                        }
+                        PositionedLayoutItem::InlineBox(_) => {}
+                    }
+                }
+                Some(advance + data.metrics.hanging_advance)
+            })
+            .collect()
+    };
 
     // Apply alignment to line items
-    for line in &mut layout.lines {
-        line.justification.amount_per_opportunity = 0.;
+    for (index, line) in layout.data.lines.iter_mut().enumerate() {
+        if let Some(advance) = visual_advances[index] {
+            line.metrics.advance = advance;
+        }
 
         let indent = line.metrics.indent;
 

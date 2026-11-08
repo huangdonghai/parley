@@ -2114,6 +2114,10 @@ fn commit_line<B: Brush>(
     // The breaker sets `end_hanging` when it keeps an overflowing glyph on the
     // line by hanging it; its `state.x` then already excludes the glyph, so
     // there is nothing more to subtract from the line's advance here.
+    // The breaker sets `end_hanging` when it keeps an overflowing glyph on the
+    // line by hanging it; its `state.x` then already excludes the glyph, and
+    // restoring it keeps the metric contract that `advance` includes every
+    // hanging glyph so widths subtract it once.
     let breaker_hung = state.end_hanging;
     let hanging_punctuation_advance =
         if state.last_text_hanging_class.is_some_and(|class| {
@@ -2144,14 +2148,19 @@ fn commit_line<B: Brush>(
             let hangs =
                 hangs && !(state.last_text_hanging_blocked && state.last_text_hanging_run_end);
             if breaker_hung || hangs {
-                if breaker_hung {
-                    0.0
-                } else {
-                    state.last_text_hanging_advance
-                }
+                state.last_text_hanging_advance
             } else {
                 0.0
             }
+        } else {
+            0.0
+        };
+    // A line the breaker kept its last glyph hanging on was appended (and has
+    // its `state.x` measured) without the glyph. Restoring it here keeps the
+    // metric contract that `advance` includes every hanging glyph exactly once.
+    let advance = state.x
+        + if breaker_hung {
+            state.last_text_hanging_advance
         } else {
             0.0
         };
@@ -2183,7 +2192,7 @@ fn commit_line<B: Brush>(
         },
         metrics: LineMetrics {
             indent: line_indent,
-            advance: state.x,
+            advance,
             hanging_advance: hanging_advance + hanging_punctuation_advance,
             start_hanging_advance: state.first_hanging_advance,
             ..Default::default()

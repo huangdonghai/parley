@@ -331,6 +331,42 @@ impl<'a, B: Brush> GlyphRun<'a, B> {
         self.advance
     }
 
+    /// The advance of hanging punctuation that belongs to this glyph run, as
+    /// `(before, after)` in inline-axis coordinates.
+    ///
+    /// The glyph run's own [`Self::advance`] omits these advances so that the
+    /// glyphs hang outside the line's content box. Painting an inline box still
+    /// has to cover them, because the glyphs belong to that box (CSS Text 3
+    /// §8.2).
+    pub fn hanging_punctuation_advance(&self) -> (f32, f32) {
+        if self.run.line_data.is_none() {
+            return (0.0, 0.0);
+        }
+        let line = &self.run.layout.data.lines[self.run.line_index as usize];
+        let slice = self.run.full_slice();
+        let advance_at = |cluster: u32| {
+            if self.shaped_clusters.contains(&cluster) {
+                slice
+                    .atoms_from(cluster)
+                    .next()
+                    .map_or(0.0, |atom| atom.advance())
+            } else {
+                0.0
+            }
+        };
+        let start = line.first_hanging_cluster.map_or(0.0, advance_at);
+        let end = if line.end_hanging {
+            line.last_hanging_cluster.map_or(0.0, advance_at)
+        } else {
+            0.0
+        };
+        if self.run.layout.data.base_level.is_rtl() {
+            (end, start)
+        } else {
+            (start, end)
+        }
+    }
+
     /// Returns an iterator over the glyphs in the run.
     pub fn glyphs(&'a self) -> impl Iterator<Item = Glyph> + 'a + Clone {
         self.run.glyphs_in(self.shaped_clusters.clone())
@@ -460,7 +496,10 @@ impl<'a, B: Brush> Iterator for GlyphRunIter<'a, B> {
                     let y = self.line.inline_box_top(box_index);
 
                     self.item_index += 1;
-                    if inline_box.kind == InlineBoxKind::InFlow {
+                    if matches!(
+                        inline_box.kind,
+                        InlineBoxKind::InFlow | InlineBoxKind::InlineEdge
+                    ) {
                         self.offset += inline_box.width;
                     }
                     return Some(PositionedLayoutItem::InlineBox(PositionedInlineBox {

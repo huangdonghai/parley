@@ -16,7 +16,7 @@ use crate::layout::spacing::{EffectiveSpacing, Justification, is_word_separator}
 use crate::layout::style_metrics::{
     BoxMetrics, InlineBoxPlacement, StyleMetrics, inline_box_placement,
 };
-use crate::layout::whitespace::atom_hanging_advance;
+use crate::layout::whitespace::{atom_hanging_advance, whitespace_hangs};
 use crate::layout::{
     BreakReason, Layout, LayoutData, LayoutItem, LayoutItemKind, LineData, LineItemData,
     LineMetrics, Run,
@@ -101,6 +101,9 @@ struct LineState {
     last_hanging_cluster: Option<u32>,
     last_text_hanging_style: crate::HangingPunctuation,
     end_hanging: bool,
+    /// Whether any drawn content (a later text atom or an inline box) stands
+    /// after the punctuation named by `last_text_hanging_*`.
+    hanging_followed_by_content: bool,
     /// Whether the last text atom appended is also the last atom of its run.
     last_text_hanging_run_end: bool,
     /// Whether the last text atom appended is after an inline end inset.
@@ -133,6 +136,7 @@ impl LineState {
         self.last_hanging_cluster = None;
         self.last_text_hanging_style = crate::HangingPunctuation::NONE;
         self.end_hanging = false;
+        self.hanging_followed_by_content = false;
         self.last_text_hanging_run_end = false;
         self.last_text_hanging_blocked = false;
         self.last_text_end_hanging_advance = 0.0;
@@ -762,13 +766,18 @@ impl BreakerState {
                 data.vertical,
             ));
         if atom.characters()[0].whitespace == Whitespace::None {
+            // This atom is now the last drawn one, so nothing stands after it.
+            self.line.hanging_followed_by_content = false;
             self.line.last_text_hanging_class =
                 Some(atom.characters()[0].flags.hanging_punctuation_class());
             self.line.last_text_hanging_advance = atom.advance();
             self.line.last_text_hanging_cluster = Some(range.start);
-            self.line.last_text_hanging_style = data.styles[style_index as usize].hanging_punctuation;
+            self.line.last_text_hanging_style =
+                data.styles[style_index as usize].hanging_punctuation;
             let run_index = data.items[self.item_idx].index;
-            let run_range = data.shaped_text.runs()[run_index].shaped_clusters_range.clone();
+            let run_range = data.shaped_text.runs()[run_index]
+                .shaped_clusters_range
+                .clone();
             self.line.last_text_hanging_run_end = range.end == run_range.end;
             self.line.last_text_hanging_blocked =
                 data.styles[style_index as usize].hang_end_blocked;
@@ -825,6 +834,8 @@ impl BreakerState {
     ) {
         self.item_idx += 1;
         self.line.items.end += 1;
+        // A box is drawn content, so a punctuation before it is mid-line.
+        self.line.hanging_followed_by_content = true;
         self.line.x = next_x;
         if inline_box.vertical_align.is_line_relative() {
             self.line.box_metrics.add_line_relative_inline_box(
@@ -997,19 +1008,30 @@ impl<'a, B: Brush> BreakLines<'a, B> {
         let quantize = self.layout.data.quantize;
         let layout_box = &mut self.layout.data.inline_boxes[index];
         let inline_box = &layout_box.inline_box;
-        if inline_box.kind == InlineBoxKind::InFlow {
-            let placement = inline_box_placement(
-                inline_box,
-                layout_box.parent_style_index,
-                &self.layout.data.style_metrics,
-                quantize,
-            );
-            layout_box.baseline_offset = placement.baseline_offset;
-            self.state
-                .append_aligned_inline_box_to_line(next_x, inline_box, placement, quantize);
-        } else {
-            self.state
-                .append_inline_box_to_line(next_x, f32::NEG_INFINITY, f32::NEG_INFINITY);
+        match inline_box.kind {
+            InlineBoxKind::InFlow => {
+                let placement = inline_box_placement(
+                    inline_box,
+                    layout_box.parent_style_index,
+                    &self.layout.data.style_metrics,
+                    quantize,
+                );
+                layout_box.baseline_offset = placement.baseline_offset;
+                self.state
+                    .append_aligned_inline_box_to_line(next_x, inline_box, placement, quantize);
+            }
+            InlineBoxKind::HangBoundary => {
+                self.state.append_inline_box_to_line(next_x, 0.0, 0.0);
+                self.state.line.hanging_followed_by_content = true;
+            }
+            InlineBoxKind::InlineEdge => {
+                self.state
+                    .append_inline_box_to_line(next_x, f32::NEG_INFINITY, f32::NEG_INFINITY);
+            }
+            InlineBoxKind::OutOfFlow | InlineBoxKind::CustomOutOfFlow => {
+                self.state
+                    .append_inline_box_to_line(next_x, f32::NEG_INFINITY, f32::NEG_INFINITY);
+            }
         }
     }
 
@@ -1184,6 +1206,17 @@ impl<'a, B: Brush> BreakLines<'a, B> {
                     // line and otherwise skipped.
                     let (width_contribution, height_contribution) = match inline_box.kind {
                         InlineBoxKind::InFlow => (inline_box.width, inline_box.height),
+                        InlineBoxKind::HangBoundary => {
+                            self.append_layout_inline_box(item.index, self.state.line.x);
+                            continue;
+                        }
+                        InlineBoxKind::InlineEdge => {
+                            self.append_layout_inline_box(
+                                item.index,
+                                self.state.line.x + inline_box.width,
+                            );
+                            continue;
+                        }
                         InlineBoxKind::OutOfFlow => {
                             self.append_layout_inline_box(item.index, self.state.line.x);
                             continue;
@@ -1368,30 +1401,47 @@ impl<'a, B: Brush> BreakLines<'a, B> {
                         // in the line. If there is no such line-breaking opportunity (such as if wrapping is disabled), then
                         // we fall back to appending the content to the line anyway.
                         else {
-                            let is_run_end = atom.shaped_clusters_range().end
-                                == slice.shaped_clusters_range().end;
                             let is_content_end = atom.shaped_clusters_range().end
-                                == self
-                                    .layout
-                                    .data
-                                    .shaped_text
-                                    .shaped_clusters()
-                                    .len() as u32;
-                            let blocked = style.hang_end_blocked && is_run_end;
-                            let hanging_end_cluster =
-                                (!blocked
-                                    && !self.state.line.end_hanging
-                                    && ((first_character.flags.hanging_punctuation_class()
-                                        == HangingPunctuationClass::StopOrComma
-                                        && (style.hanging_punctuation.allow_end()
-                                            || style.hanging_punctuation.force_end()))
-                                        || (style.hanging_punctuation.last()
-                                            && matches!(
-                                                first_character.flags.hanging_punctuation_class(),
-                                                HangingPunctuationClass::Closing
-                                                    | HangingPunctuationClass::AmbiguousQuote
-                                            )
-                                            && is_content_end)))
+                                == self.layout.data.shaped_text.shaped_clusters().len() as u32;
+                            // An inline edge blocks hanging only where it is drawn on
+                            // this line. In particular, an element the line cuts has
+                            // not reached its end edge yet (CSS Text 3 §8.2.1).
+                            let blocked = (style.hang_start_blocked || style.hang_end_blocked)
+                                && inline_end_on_line(
+                                    self.layout,
+                                    &atom,
+                                    style,
+                                    is_content_end,
+                                    self.state.item_idx,
+                                );
+                            // A hanging glyph ends its line, so the line break
+                            // after it has to be one the breaks rules allow:
+                            // the end of the text (which acts as a forced break),
+                            // a mandatory break, or a soft-wrap opportunity in
+                            // a container that wraps. Without this, a stop or
+                            // comma inside an unbreakable unit would be torn out
+                            // of it and line-broken after itself.
+                            let hang_break = hanging_break_after(
+                                self.layout,
+                                &atom,
+                                style,
+                                is_content_end,
+                                self.state.item_idx,
+                            );
+                            let hanging_end_cluster = (!blocked
+                                && hang_break != HangBreak::None
+                                && !self.state.line.end_hanging
+                                && ((first_character.flags.hanging_punctuation_class()
+                                    == HangingPunctuationClass::StopOrComma
+                                    && (style.hanging_punctuation.allow_end()
+                                        || style.hanging_punctuation.force_end()))
+                                    || (style.hanging_punctuation.last()
+                                        && matches!(
+                                            first_character.flags.hanging_punctuation_class(),
+                                            HangingPunctuationClass::Closing
+                                                | HangingPunctuationClass::AmbiguousQuote
+                                        )
+                                        && is_content_end)))
                                 .then_some(atom.shaped_clusters_range().start);
                             if hanging_end_cluster.is_some() {
                                 let end_ctx = TrimLineContext {
@@ -1423,17 +1473,18 @@ impl<'a, B: Brush> BreakLines<'a, B> {
                                     );
                                     self.state.line.end_hanging = true;
                                     self.state.line.last_hanging_cluster = hanging_end_cluster;
-                                    let end_of_text = self.state.cluster_idx
-                                        >= self.layout.data.shaped_text.shaped_clusters().len() as u32;
-                                    let line = self.start_new_line(
-                                        BreakReason::Regular,
-                                        max_advance,
-                                        line_indent,
-                                    );
-                                    if end_of_text {
-                                        self.done = true;
+                                    // A line already ended by a forced break or
+                                    // by the end of the text needs no early
+                                    // break; closing it there would leave an
+                                    // extra empty line after the hanging glyph.
+                                    if hang_break == HangBreak::Soft {
+                                        return self.start_new_line(
+                                            BreakReason::Regular,
+                                            max_advance,
+                                            line_indent,
+                                        );
                                     }
-                                    return line;
+                                    continue;
                                 }
                             }
                             // `allow-end`/`trim-end`: a closing atom that does not fit
@@ -1488,7 +1539,11 @@ impl<'a, B: Brush> BreakLines<'a, B> {
                                 spacing,
                                 item.bidi_level.is_rtl(),
                             );
-                            if all_hang || next_x - hanging <= max_advance {
+                            // A negative inline margin can pull an overflowing last
+                            // atom back into the line once the margin is reached.
+                            let trailing_edge =
+                                inline_edge_after(self.layout, &atom, self.state.item_idx);
+                            if all_hang || next_x - hanging + trailing_edge <= max_advance {
                                 if max_height_exceeded {
                                     return self.max_height_break_data(line_height);
                                 }
@@ -1588,6 +1643,14 @@ impl<'a, B: Brush> BreakLines<'a, B> {
             match item.kind {
                 LayoutItemKind::InlineBox => {
                     let inline_box = &self.layout.data.inline_boxes[item.index].inline_box;
+
+                    if inline_box.kind == InlineBoxKind::InlineEdge {
+                        self.append_layout_inline_box(
+                            item.index,
+                            self.state.line.x + inline_box.width,
+                        );
+                        continue;
+                    }
 
                     if inline_box.kind != InlineBoxKind::InFlow {
                         self.append_layout_inline_box(item.index, self.state.line.x);
@@ -1921,11 +1984,8 @@ impl<B: Brush> Drop for BreakLines<'_, B> {
             let indent_extra = line.metrics.indent.max(0.0);
             let line_max = line.metrics.inline_min_coord + line.metrics.advance + indent_extra;
             layout_full_width = layout_full_width.max(line_max);
-            layout_width = layout_width.max(
-                line_max
-                    - line.metrics.hanging_advance
-                    - line.metrics.start_hanging_advance,
-            );
+            layout_width = layout_width
+                .max(line_max - line.metrics.hanging_advance - line.metrics.start_hanging_advance);
             height += line.metrics.line_height as f64;
         }
 
@@ -1955,6 +2015,206 @@ impl<B: Brush> Drop for BreakLines<'_, B> {
         // Save the computed lines to the layout
         self.lines.swap(&mut self.layout.data);
     }
+}
+
+/// Why a line may end after the atom that a hanging glyph follows.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum HangBreak {
+    /// The line may not end there.
+    None,
+    /// The text ends there, or a forced break follows: the line closes itself.
+    Mandatory,
+    /// A soft-wrap opportunity follows: the hanging glyph closes the line.
+    Soft,
+    /// A soft-wrap opportunity follows only past whitespace that itself hangs
+    /// at the line end: the whitespace goes with the hanging glyph.
+    SoftAfterSpace,
+}
+
+/// How a line may end after `atom`, which is what a hanging closing glyph
+/// needs: the end of the text, a mandatory break, or a soft-wrap opportunity.
+///
+/// Whitespace that hangs at the line end is removed from the line, so the
+/// opportunity after it is the position a hanging glyph would end the line at.
+/// Walking forward keeps the style that governs each opportunity the same one
+/// the breaker uses: the style of the atom before it.
+fn hanging_break_after<B: Brush>(
+    layout: &Layout<B>,
+    atom: &Atom<'_>,
+    style: &crate::layout::Style<B>,
+    is_content_end: bool,
+    item_idx: usize,
+) -> HangBreak {
+    if is_content_end {
+        return HangBreak::Mandatory;
+    }
+
+    let mut cursor = atom.cursor_after();
+    let mut wrapping = style.text_wrap_mode == TextWrapMode::Wrap;
+    let mut after_hanging_whitespace = false;
+
+    while let Some(next) = cursor.next() {
+        let character = &next.characters()[0];
+
+        if character.whitespace == Whitespace::Newline {
+            return HangBreak::Mandatory;
+        }
+
+        if wrapping && character.flags.is_soft_wrap_opportunity() {
+            return if after_hanging_whitespace {
+                HangBreak::SoftAfterSpace
+            } else {
+                HangBreak::Soft
+            };
+        }
+
+        let next_style = &layout.data.styles[character.style_index as usize];
+
+        if !whitespace_hangs(character.whitespace, next_style) {
+            return HangBreak::None;
+        }
+
+        after_hanging_whitespace = true;
+        wrapping = next_style.text_wrap_mode == TextWrapMode::Wrap;
+    }
+
+    // The atom ends its run: the break then falls at the start of the next
+    // inline content, whose first character carries the opportunity.
+    for item in &layout.data.items[item_idx + 1..] {
+        match item.kind {
+            LayoutItemKind::TextRun => {
+                let slice = layout.data.shaped_text.run_slice(item.index as u32);
+                let Some(character) = slice
+                    .shaped_clusters()
+                    .first()
+                    .and_then(|cluster| slice.characters_in(cluster.chars_range()).first())
+                else {
+                    continue;
+                };
+                return if character.whitespace == Whitespace::Newline {
+                    HangBreak::Mandatory
+                } else if wrapping && character.flags.is_soft_wrap_opportunity() {
+                    if after_hanging_whitespace {
+                        HangBreak::SoftAfterSpace
+                    } else {
+                        HangBreak::Soft
+                    }
+                } else {
+                    HangBreak::None
+                };
+            }
+            LayoutItemKind::InlineBox => {
+                let inline_box = &layout.data.inline_boxes[item.index].inline_box;
+                if inline_box.kind == InlineBoxKind::InlineEdge {
+                    continue;
+                }
+                if !matches!(
+                    inline_box.kind,
+                    InlineBoxKind::InFlow | InlineBoxKind::HangBoundary
+                ) {
+                    continue;
+                }
+                // An in-flow inline box is drawn content between the glyph and
+                // the line's edge. Hanging would tear the punctuation away from
+                // the box that follows it.
+                return HangBreak::None;
+            }
+        }
+    }
+
+    HangBreak::None
+}
+
+/// Whether `atom` is the last drawn character of its inline element on this
+/// line. A non-zero inline edge inset is an obstacle to hanging only when that
+/// edge is drawn here; an element the line continues past has its end edge on
+/// a later line (CSS Text 3 §8.2.1).
+fn inline_end_on_line<B: Brush>(
+    layout: &Layout<B>,
+    atom: &Atom<'_>,
+    style: &crate::layout::Style<B>,
+    is_content_end: bool,
+    item_idx: usize,
+) -> bool {
+    if style.inline_element_id == 0 {
+        return true;
+    }
+    if is_content_end {
+        return true;
+    }
+
+    let element_id = style.inline_element_id;
+    let mut cursor = atom.cursor_after();
+    while let Some(next) = cursor.next() {
+        let character = &next.characters()[0];
+        if character.whitespace == Whitespace::Newline {
+            return true;
+        }
+        let next_style = &layout.data.styles[character.style_index as usize];
+        if next_style.inline_element_id == element_id {
+            return false;
+        }
+        return true;
+    }
+
+    for item in &layout.data.items[item_idx + 1..] {
+        match item.kind {
+            LayoutItemKind::TextRun => {
+                let slice = layout.data.shaped_text.run_slice(item.index as u32);
+                let Some(character) = slice
+                    .shaped_clusters()
+                    .first()
+                    .and_then(|cluster| slice.characters_in(cluster.chars_range()).first())
+                else {
+                    continue;
+                };
+                if character.whitespace == Whitespace::Newline {
+                    return true;
+                }
+                let next_style = &layout.data.styles[character.style_index as usize];
+                return next_style.inline_element_id != element_id;
+            }
+            LayoutItemKind::InlineBox => {
+                let layout_box = &layout.data.inline_boxes[item.index];
+                if layout_box.inline_box.kind == InlineBoxKind::InlineEdge {
+                    continue;
+                }
+                if !matches!(
+                    layout_box.inline_box.kind,
+                    InlineBoxKind::InFlow | InlineBoxKind::HangBoundary
+                ) {
+                    continue;
+                }
+                let parent = &layout.data.styles[usize::from(layout_box.parent_style_index)];
+                return parent.inline_element_id != element_id;
+            }
+        }
+    }
+
+    true
+}
+
+/// The sum of zero-height inline edge widths immediately following `atom`.
+///
+/// Inline margins are outside the text run, so a negative end margin can make
+/// a line fit only after the run has been consumed. It is zero unless `atom`
+/// is the run's last atom, because otherwise the edge is not adjacent yet.
+fn inline_edge_after<B: Brush>(layout: &Layout<B>, atom: &Atom<'_>, item_idx: usize) -> f32 {
+    if atom.cursor_after().next().is_some() {
+        return 0.0;
+    }
+    let mut advance = 0.0;
+    for item in &layout.data.items[item_idx + 1..] {
+        if item.kind != LayoutItemKind::InlineBox {
+            break;
+        }
+        let inline_box = &layout.data.inline_boxes[item.index].inline_box;
+        if inline_box.kind != InlineBoxKind::InlineEdge {
+            break;
+        }
+        advance += inline_box.width;
+    }
+    advance
 }
 
 #[expect(clippy::cast_possible_truncation, reason = "deferred")]
@@ -2102,8 +2362,8 @@ fn commit_line<B: Brush>(
                     HangingPunctuationClass::Closing | HangingPunctuationClass::AmbiguousQuote
                 )
             })
-            && (break_reason == BreakReason::None
-                || state.end_hanging)
+            && !state.hanging_followed_by_content
+            && (break_reason == BreakReason::None || state.end_hanging)
         {
             // hanging punctuation gives up its advance instead of trimming
         } else {
@@ -2119,42 +2379,41 @@ fn commit_line<B: Brush>(
     // restoring it keeps the metric contract that `advance` includes every
     // hanging glyph so widths subtract it once.
     let breaker_hung = state.end_hanging;
-    let hanging_punctuation_advance =
-        if state.last_text_hanging_class.is_some_and(|class| {
-            matches!(
-                class,
-                HangingPunctuationClass::StopOrComma
-                    | HangingPunctuationClass::Closing
-                    | HangingPunctuationClass::AmbiguousQuote
-            )
-        }) {
-            let property = state.last_text_hanging_style;
-            let hangs = match state.last_text_hanging_class {
+    let hanging_punctuation_advance = if state.last_text_hanging_class.is_some_and(|class| {
+        matches!(
+            class,
+            HangingPunctuationClass::StopOrComma
+                | HangingPunctuationClass::Closing
+                | HangingPunctuationClass::AmbiguousQuote
+        )
+    }) {
+        let property = state.last_text_hanging_style;
+        let hangs = !state.hanging_followed_by_content
+            && match state.last_text_hanging_class {
                 Some(HangingPunctuationClass::StopOrComma) => {
                     property.force_end()
                         || (property.allow_end()
                             && state.x - state.last_text_hanging_advance <= max_advance
                             && state.x > max_advance)
                 }
-                Some(HangingPunctuationClass::Closing | HangingPunctuationClass::AmbiguousQuote) => {
-                    property.last() && break_reason == BreakReason::None
-                }
+                Some(
+                    HangingPunctuationClass::Closing | HangingPunctuationClass::AmbiguousQuote,
+                ) => property.last() && break_reason == BreakReason::None,
                 _ => false,
             };
-            // A non-zero inline end inset of the atom's element blocks hanging
-            // here (CSS Text 3 §8.2.1); at wrap points the inset is only on the
-            // element's last fragment, which this finish-line check narrows to atoms
-            // that end their run.
-            let hangs =
-                hangs && !(state.last_text_hanging_blocked && state.last_text_hanging_run_end);
-            if breaker_hung || hangs {
-                state.last_text_hanging_advance
-            } else {
-                0.0
-            }
+        // A non-zero inline end inset of the atom's element blocks hanging
+        // here (CSS Text 3 §8.2.1); at wrap points the inset is only on the
+        // element's last fragment, which this finish-line check narrows to atoms
+        // that end their run.
+        let hangs = hangs && !(state.last_text_hanging_blocked && state.last_text_hanging_run_end);
+        if breaker_hung || hangs {
+            state.last_text_hanging_advance
         } else {
             0.0
-        };
+        }
+    } else {
+        0.0
+    };
     // A line the breaker kept its last glyph hanging on was appended (and has
     // its `state.x` measured) without the glyph. Restoring it here keeps the
     // metric contract that `advance` includes every hanging glyph exactly once.
@@ -2185,9 +2444,11 @@ fn commit_line<B: Brush>(
         last_hanging_cluster: state.last_hanging_cluster,
         num_justification_opportunities,
         justification: Justification {
-            justification_end_cluster: state.last_hanging_cluster.map_or(justification_end_cluster, |cluster| {
-                justification_end_cluster.min(cluster)
-            }),
+            justification_end_cluster: state
+                .last_hanging_cluster
+                .map_or(justification_end_cluster, |cluster| {
+                    justification_end_cluster.min(cluster)
+                }),
             ..Justification::NONE
         },
         metrics: LineMetrics {

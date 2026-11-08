@@ -496,6 +496,7 @@ impl ContentWidthsMeasurer {
         // formatted line is outside the line it opens.
         if self.start_hang > 0.0 {
             self.running_min_width -= self.start_hang;
+            self.running_max_width -= self.start_hang;
             self.start_hang = 0.0;
         }
         self.min_width = self
@@ -567,6 +568,11 @@ impl ContentWidthsMeasurer {
                 }
                 LayoutItemKind::InlineBox => {
                     let inline_box = &layout_data.inline_boxes[item.index].inline_box;
+                    if inline_box.kind == InlineBoxKind::InlineEdge {
+                        self.running_min_width += inline_box.width;
+                        self.running_max_width += inline_box.width;
+                        continue;
+                    }
                     if inline_box.kind == InlineBoxKind::InFlow {
                         let next = items.as_slice().iter().find(|next| {
                             next.kind == LayoutItemKind::TextRun
@@ -748,9 +754,6 @@ impl ContentWidthsMeasurer {
         {
             let advance = EffectiveSpacing::new(spacing, Justification::NONE).atom_advance(&atom);
             self.end_hang = advance;
-            if std::env::var_os("CUOTUO_MEASURE_DEBUG").is_some() {
-                std::eprintln!("measure end_hang={advance} last");
-            }
         }
         self.line_has_content = empty_at != clusters.len();
     }

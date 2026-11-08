@@ -59,4 +59,14 @@ pub enum InlineBoxKind {
     ///
     /// They can be used to implement advanced layout modes such as CSS's `float`
     CustomOutOfFlow,
+    /// An empty in-flow inline box whose inline-axis border or padding is
+    /// non-zero.
+    ///
+    /// It takes no room and draws nothing, but it is still an inline box
+    /// boundary, so content on either side of it cannot be treated as adjacent
+    /// for `hanging-punctuation`.
+    HangBoundary,
+    /// A zero-height inline edge that contributes only its width along the
+    /// inline axis, such as the margin of a non-replaced inline element.
+    InlineEdge,
 }

@@ -285,7 +285,10 @@ impl<'b, B: Brush> TreeBuilder<'b, B> {
     }
 
     pub fn push_inline_box(&mut self, mut inline_box: InlineBox) {
-        if inline_box.kind == InlineBoxKind::InFlow {
+        if matches!(
+            inline_box.kind,
+            InlineBoxKind::InFlow | InlineBoxKind::HangBoundary | InlineBoxKind::InlineEdge
+        ) {
             self.lcx.tree_style_builder.flush_pending_whitespace();
             self.lcx.tree_style_builder.set_last_item_is_inline_box();
         }

@@ -45,8 +45,8 @@ pub use crate::editing::{Cursor, Selection};
 
 use crate::style::Brush;
 use crate::{
-    LineHeight, OverflowWrap, TextAutospace, TextSpacingTrim, TextWrapMode, VerticalAlign,
-    WhiteSpaceCollapse,
+    HangingPunctuation, LineHeight, OverflowWrap, TextAutospace, TextSpacingTrim, TextWrapMode,
+    VerticalAlign, WhiteSpaceCollapse,
 };
 
 /// Style properties.
@@ -75,6 +75,14 @@ pub struct Style<B: Brush> {
     pub(crate) text_spacing_trim: TextSpacingTrim,
     /// CSS `text-autospace`.
     pub(crate) text_autospace: TextAutospace,
+    /// CSS `hanging-punctuation`.
+    pub(crate) hanging_punctuation: HangingPunctuation,
+    /// Whether an inline start inset blocks hanging at the line start.
+    pub(crate) hang_start_blocked: bool,
+    /// Whether an inline end inset blocks hanging at the line end.
+    pub(crate) hang_end_blocked: bool,
+    /// The inline element this run belongs to.
+    pub(crate) inline_element_id: u64,
     /// The locale of the text, if any.
     ///
     /// This is useful for consumers exposing the text to assistive technologies,

@@ -182,12 +182,14 @@ pub struct LineMetrics {
 
     /// The portion of [`Self::advance`] that hangs past the line's end edge.
     ///
-    /// For LTR paragraphs, this is the right edge, and in RTL paragraphs, it's the left edge.
-    //
-    // Note: only whitespace hangs at the moment. With something like hanging punctuation, inked
-    // content could hang past both the start and end edge. That would likely require splitting this
-    // into two fields.
+    /// This is hanging whitespace and hanging punctuation at the line end.
     pub hanging_advance: f32,
+
+    /// The portion of [`Self::advance`] that hangs past the line's start edge.
+    ///
+    /// This is hanging punctuation at the line start. Its glyph is outside the line box;
+    /// its advance is still included in [`Self::advance`] so internal widths can subtract it once.
+    pub start_hanging_advance: f32,
 
     /// The minimum inline-axis coordinate of the line.
     ///

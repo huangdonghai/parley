@@ -61,6 +61,49 @@ pub enum TextAutospace {
     Normal,
 }
 
+/// CSS `hanging-punctuation`.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct HangingPunctuation(u8);
+
+impl HangingPunctuation {
+    /// No punctuation hangs.
+    pub const NONE: Self = Self(0);
+    /// Opening punctuation hangs at the start of the first line.
+    pub const FIRST: Self = Self(1 << 0);
+    /// Closing punctuation hangs at the end of the last formatted line.
+    pub const LAST: Self = Self(1 << 1);
+    /// A stop or comma that would overflow hangs at each line end.
+    pub const ALLOW_END: Self = Self(1 << 2);
+    /// A stop or comma hangs at each line end.
+    pub const FORCE_END: Self = Self(1 << 3);
+
+    /// Union of two `hanging-punctuation` values.
+    pub const fn union(self, other: Self) -> Self {
+        Self(self.0 | other.0)
+    }
+
+    pub(crate) const fn is_none(self) -> bool {
+        self.0 == 0
+    }
+
+    pub(crate) const fn first(self) -> bool {
+        self.0 & Self::FIRST.0 != 0
+    }
+
+    pub(crate) const fn last(self) -> bool {
+        self.0 & Self::LAST.0 != 0
+    }
+
+    pub(crate) const fn allow_end(self) -> bool {
+        self.0 & Self::ALLOW_END.0 != 0
+    }
+
+    pub(crate) const fn force_end(self) -> bool {
+        self.0 & Self::FORCE_END.0 != 0
+    }
+
+}
+
 /// The height that this text takes up. The default is `MetricsRelative(1.0)`, which is the given
 /// font's preferred line height.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -289,6 +332,8 @@ pub enum StyleProperty<'a, B: Brush> {
     TextSpacingTrim(TextSpacingTrim),
     /// CSS `text-autospace`.
     TextAutospace(TextAutospace),
+    /// CSS `hanging-punctuation`.
+    HangingPunctuation(HangingPunctuation),
     /// CSS `text-orientation`.
     TextOrientation(TextOrientation),
     /// CSS `text-combine-upright`.
@@ -354,6 +399,20 @@ pub struct TextStyle<'family, 'settings, B: Brush> {
     pub text_spacing_trim: TextSpacingTrim,
     /// CSS `text-autospace`.
     pub text_autospace: TextAutospace,
+    /// CSS `hanging-punctuation`.
+    pub hanging_punctuation: HangingPunctuation,
+    /// Whether this run sits inside an inline element whose inline-axis
+    /// border or padding at the start edge prevents `hanging-punctuation`
+    /// from hanging there (CSS Text 3 §8.2.1).
+    pub hang_start_blocked: bool,
+    /// Whether this run sits inside an inline element whose inline-axis
+    /// border or padding at the end edge prevents `hanging-punctuation`
+    /// from hanging there (CSS Text 3 §8.2.1).
+    pub hang_end_blocked: bool,
+    /// Id of the inline element this run belongs to (0 from style mutations is
+    /// the paragraph root): used to tell a run that introduces an element from
+    /// one continuing it (CSS Text 3 §8.2.1 `first`).
+    pub inline_element_id: u64,
     /// CSS `text-orientation`.
     pub text_orientation: TextOrientation,
     /// CSS `text-combine-upright`.
@@ -396,6 +455,10 @@ impl<B: Brush> Default for TextStyle<'static, 'static, B> {
             letter_spacing: 0.0,
             text_spacing_trim: TextSpacingTrim::normal(),
             text_autospace: TextAutospace::NoAutospace,
+            hanging_punctuation: HangingPunctuation::NONE,
+            hang_start_blocked: false,
+            hang_end_blocked: false,
+            inline_element_id: 0,
             text_orientation: TextOrientation::Mixed,
             text_combine_upright: false,
             word_break: WordBreak::default(),
@@ -446,6 +509,12 @@ impl<B: Brush> From<TextSpacingTrim> for StyleProperty<'_, B> {
 impl<B: Brush> From<TextAutospace> for StyleProperty<'_, B> {
     fn from(value: TextAutospace) -> Self {
         StyleProperty::TextAutospace(value)
+    }
+}
+
+impl<B: Brush> From<HangingPunctuation> for StyleProperty<'_, B> {
+    fn from(value: HangingPunctuation) -> Self {
+        StyleProperty::HangingPunctuation(value)
     }
 }
 

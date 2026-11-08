@@ -247,12 +247,13 @@ pub(crate) fn shape_text<'a, B: Brush>(
             enabled: matches!(style.text_autospace, crate::TextAutospace::Normal),
             orientation: style.text_orientation,
             combined: style.text_combine_upright,
+            hanging: !style.hanging_punctuation.is_none(),
         })
         .collect();
     layout
         .data
         .shaped_text
-        .set_autospace_classes(text, &auto_space_styles);
+        .set_text_spacing_classes(text, &auto_space_styles);
 
     let mut inline_box_iter = inline_boxes
         .iter()
@@ -305,6 +306,7 @@ pub(crate) fn shape_text<'a, B: Brush>(
                 autospace_horizontal * 0.125,
                 autospace_vertical * 0.125,
             )
+            .with_hanging(run_style.hanging_punctuation)
             .with_width_features(
                 overrides_spacing_trim(&style_features[run_style_index as usize], false),
                 overrides_spacing_trim(&style_features[run_style_index as usize], true),

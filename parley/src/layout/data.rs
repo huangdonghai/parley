@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
 use crate::inline_box::{InlineBox, LayoutInlineBox};
-use crate::layout::spacing::{Justification, Spacing};
+use crate::layout::spacing::{EffectiveSpacing, Justification, Spacing};
 use crate::layout::style_metrics::{BoxMetrics, StyleMetrics};
 use crate::layout::whitespace::whitespace_hangs;
 use crate::layout::{ContentWidths, LineMetrics, Style};
@@ -97,6 +97,11 @@ pub(crate) struct LineData {
     pub(crate) last_text_cluster: Option<u32>,
     /// Whether the line's last closing atom was trimmed for `text-spacing-trim`'s end position.
     pub(crate) end_trimmed: bool,
+    /// Whether the line's last atom hangs punctuation.
+    pub(crate) end_hanging: bool,
+    /// `hanging-punctuation` atoms at the two line edges, if any.
+    pub(crate) first_hanging_cluster: Option<u32>,
+    pub(crate) last_hanging_cluster: Option<u32>,
     /// The number of justification opportunities on the line.
     pub(crate) num_justification_opportunities: u32,
     pub(crate) justification: Justification,
@@ -440,10 +445,19 @@ struct ContentWidthsMeasurer {
     hangs_conditionally: bool,
 
     text_wrap_mode: TextWrapMode,
+    /// The inline-element id of the previous text run: a run introduces a new
+    /// element when this changes (`hanging-punctuation: first`).
+    last_span_id: Option<u64>,
+    /// Advance of the first hanging opening glyph, deducted with the hanging
+    /// whitespace at every line break.
+    start_hang: f32,
 
     /// Indents for lines following a soft/hard wrap.
     soft_indent: f32,
     hard_indent: f32,
+    /// The final closing glyph's advance (set in `measure_text_run`), deducted
+    /// at the end of the layout alongside the hanging whitespace.
+    end_hang: f32,
 }
 
 impl ContentWidthsMeasurer {
@@ -458,6 +472,9 @@ impl ContentWidthsMeasurer {
             running_hanging_whitespace: 0.,
             hangs_conditionally: false,
             text_wrap_mode: TextWrapMode::Wrap,
+            last_span_id: None,
+            start_hang: 0.0,
+            end_hang: 0.0,
             soft_indent: indent_options.indent_following_soft_wrap_break(indent_amount),
             hard_indent: indent_options.indent_following_forced_line_break(indent_amount),
             line_has_content: false,
@@ -475,6 +492,12 @@ impl ContentWidthsMeasurer {
         if !line_has_content || self.running_min_width < 0.0 {
             return;
         }
+        // An opening glyph that hangs at the start of the element's first
+        // formatted line is outside the line it opens.
+        if self.start_hang > 0.0 {
+            self.running_min_width -= self.start_hang;
+            self.start_hang = 0.0;
+        }
         self.min_width = self
             .min_width
             .max(self.running_min_width - self.running_hanging_whitespace);
@@ -489,6 +512,13 @@ impl ContentWidthsMeasurer {
     /// [css-inline-formatting]: https://www.w3.org/TR/CSS22/visuren.html#inline-formatting
     #[inline(always)]
     fn hard_break(&mut self) {
+        // An opening glyph that hangs at the start of the element's first
+        // formatted line is outside the line it opens.
+        if self.start_hang > 0.0 {
+            self.running_min_width -= self.start_hang;
+            self.running_max_width -= self.start_hang;
+            self.start_hang = 0.0;
+        }
         self.min_width = self
             .min_width
             .max(self.running_min_width - self.running_hanging_whitespace);
@@ -562,6 +592,8 @@ impl ContentWidthsMeasurer {
         // The end of a layout is considered to be a forced line break as per CSS Text 4 § 5, so
         // whitespace can hang conditionally.
         if self.line_has_content {
+            self.running_max_width -= self.end_hang;
+            self.running_min_width -= self.end_hang;
             self.hard_break();
         }
 
@@ -599,6 +631,35 @@ impl ContentWidthsMeasurer {
         let clusters = slice.shaped_clusters();
         // The cluster index at which nothing has been placed on the current line yet, if any.
         let mut empty_at = if self.line_has_content { usize::MAX } else { 0 };
+
+        // A hanging opening glyph at a new element's start and a final closing
+        // glyph never count towards intrinsic widths: mirror the line breaker's
+        // subtraction by remembering one advance at each end.
+        let first_character = clusters
+            .first()
+            .and_then(|cluster| slice.characters_in(cluster.chars_range()).first());
+        let element_start = first_character.is_some_and(|character| {
+            let style = &styles[character.style_index as usize];
+            self.last_span_id != Some(style.inline_element_id)
+                && style.hanging_punctuation.first()
+                && !style.hang_start_blocked
+                && matches!(
+                    character.flags.hanging_punctuation_class(),
+                    parley_engine::shape::HangingPunctuationClass::Opening
+                        | parley_engine::shape::HangingPunctuationClass::AmbiguousQuote
+                )
+        });
+        if first_character.is_some_and(|character| {
+            self.last_span_id = Some(styles[character.style_index as usize].inline_element_id);
+            element_start
+        }) {
+            let atom = slice.atoms_start().next();
+            if let Some(atom) = atom {
+                let advance =
+                    EffectiveSpacing::new(spacing, Justification::NONE).atom_advance(&atom);
+                self.start_hang += advance;
+            }
+        }
 
         // The spacing gap of the current atom.
         let mut gap = 0.;
@@ -670,6 +731,25 @@ impl ContentWidthsMeasurer {
                     style.white_space_collapse == WhiteSpaceCollapse::Preserve;
             } else {
                 self.running_hanging_whitespace = 0.0;
+            }
+        }
+        // The closing glyph of the whole layout hangs here: remember its
+        // advance, matching the line breaker's last-line handling.
+        if let Some(atom) = slice.atoms_end().prev()
+            && let Some(character) = atom.characters().last()
+            && let style = &styles[character.style_index as usize]
+            && style.hanging_punctuation.last()
+            && !style.hang_end_blocked
+            && matches!(
+                character.flags.hanging_punctuation_class(),
+                parley_engine::shape::HangingPunctuationClass::Closing
+                    | parley_engine::shape::HangingPunctuationClass::AmbiguousQuote
+            )
+        {
+            let advance = EffectiveSpacing::new(spacing, Justification::NONE).atom_advance(&atom);
+            self.end_hang = advance;
+            if std::env::var_os("CUOTUO_MEASURE_DEBUG").is_some() {
+                std::eprintln!("measure end_hang={advance} last");
             }
         }
         self.line_has_content = empty_at != clusters.len();

@@ -277,6 +277,23 @@ impl ShapedCluster {
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub struct CharacterFlags(u16);
 
+/// The punctuation categories `hanging-punctuation` can hang.
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
+#[repr(u8)]
+pub enum HangingPunctuationClass {
+    /// The character is not hanging punctuation.
+    #[default]
+    Other = 0,
+    /// An opening bracket or quote, or an ideographic space.
+    Opening = 1,
+    /// A closing bracket or quote.
+    Closing = 2,
+    /// A stop, comma or related character.
+    StopOrComma = 3,
+    /// An ASCII quote that may be opening or closing depending on which edge it is at.
+    AmbiguousQuote = 4,
+}
+
 /// The classes `text-autospace` distinguishes between neighbouring characters.
 #[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
 #[repr(u8)]
@@ -328,6 +345,8 @@ impl CharacterFlags {
     const AUTO_SPACE_SHIFT: u16 = 8;
     const AUTO_SPACE_MASK: u16 = 0b11 << Self::AUTO_SPACE_SHIFT;
     const AUTO_SPACE_UPRIGHT: u16 = 1 << 10;
+    const HANGING_PUNCTUATION_SHIFT: u16 = 11;
+    const HANGING_PUNCTUATION_MASK: u16 = 0b111 << Self::HANGING_PUNCTUATION_SHIFT;
 
     #[inline(always)]
     pub fn new(source_char: char, is_word_boundary: bool, is_soft_wrap_opportunity: bool) -> Self {
@@ -429,6 +448,25 @@ impl CharacterFlags {
             | if upright { Self::AUTO_SPACE_UPRIGHT } else { 0 };
     }
 
+    /// The `hanging-punctuation` class for this character.
+    #[inline(always)]
+    pub fn hanging_punctuation_class(self) -> HangingPunctuationClass {
+        match (self.0 & Self::HANGING_PUNCTUATION_MASK) >> Self::HANGING_PUNCTUATION_SHIFT {
+            1 => HangingPunctuationClass::Opening,
+            2 => HangingPunctuationClass::Closing,
+            3 => HangingPunctuationClass::StopOrComma,
+            4 => HangingPunctuationClass::AmbiguousQuote,
+            _ => HangingPunctuationClass::Other,
+        }
+    }
+
+    /// Set the `hanging-punctuation` class for this character.
+    #[inline(always)]
+    pub fn set_hanging_punctuation_class(&mut self, class: HangingPunctuationClass) {
+        self.0 = (self.0 & !Self::HANGING_PUNCTUATION_MASK)
+            | ((class as u16) << Self::HANGING_PUNCTUATION_SHIFT);
+    }
+
     /// Override this character's `text-spacing-trim` class.
     ///
     /// This is for language-dependent classification (colon/dot punctuation)
@@ -445,6 +483,45 @@ impl CharacterFlags {
     #[inline(always)]
     pub fn len_utf8(self) -> usize {
         (self.0 & u16::from(Self::LEN_UTF8_MASK)) as usize + 1
+    }
+}
+
+/// Classify a character for `hanging-punctuation` (CSS Text 3 §8.2.1).
+///
+/// It is a function taking the character and its Unicode properties because
+/// `CharacterFlags::new` cannot take both; like `auto_space_class`, callers run it once per
+/// character only when a style in the layout asks for hanging punctuation.
+pub(crate) fn hanging_punctuation_class(
+    ch: char,
+    properties: Properties,
+) -> HangingPunctuationClass {
+    if matches!(
+        ch,
+        '\u{002C}' | '\u{002E}' | '\u{060C}' | '\u{06D4}'
+            | '\u{3001}' | '\u{3002}' | '\u{FF0C}' | '\u{FF0E}'
+            | '\u{FE50}' | '\u{FE51}' | '\u{FE52}' | '\u{FF61}' | '\u{FF64}'
+    ) {
+        return HangingPunctuationClass::StopOrComma;
+    }
+
+    if matches!(ch, '\u{0027}' | '\u{0022}') {
+        return HangingPunctuationClass::AmbiguousQuote;
+    }
+
+    if ch == '\u{3000}' {
+        return HangingPunctuationClass::Opening;
+    }
+
+    // The ASCII quotes are ambiguous between opening and closing, so callers that need a
+    // side-specific answer consult a category test rather than this pre-classification.
+    match properties.general_category() {
+        GeneralCategory::OpenPunctuation | GeneralCategory::InitialPunctuation => {
+            HangingPunctuationClass::Opening
+        }
+        GeneralCategory::ClosePunctuation | GeneralCategory::FinalPunctuation => {
+            HangingPunctuationClass::Closing
+        }
+        _ => HangingPunctuationClass::Other,
     }
 }
 
@@ -515,7 +592,6 @@ fn spacing_trim_class(ch: char) -> SpacingTrimClass {
 /// This is a function taking the character and its Unicode properties because
 /// `CharacterFlags::new` cannot take both; callers run it once per character
 /// only when a style in the layout asks for `text-autospace: normal`.
-#[allow(dead_code)]
 pub(crate) fn auto_space_class(
     ch: char,
     properties: Properties,

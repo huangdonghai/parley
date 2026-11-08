@@ -140,11 +140,15 @@ impl<'a, B: Brush> Run<'a, B> {
                     first_cluster: line.first_text_cluster,
                     last_cluster: line.last_text_cluster,
                     first_line,
+                    line_is_rtl: self.layout.data.base_level.is_rtl(),
+                    hanging_for_paint: true,
                     end_trimmed: line.end_trimmed,
                     end_unknown: false,
                     prev_trigger,
                     next_trigger,
                     prev_autospace,
+                    first_punctuation_hanging_cluster: line.first_hanging_cluster,
+                    last_punctuation_hanging_cluster: line.end_hanging.then_some(line.last_hanging_cluster.unwrap_or_default()),
                 },
             )
         } else {

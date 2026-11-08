@@ -92,6 +92,9 @@ pub(crate) fn align<B: Brush>(
 
         // Compute free space.
         let line_width = line.metrics.inline_max_coord - line.metrics.inline_min_coord;
+        // `advance` already excludes a hanging start glyph (CSS Text 3 §8.2: it is not
+        // considered when measuring for alignment), but still includes a hanging end
+        // glyph, which is added back below.
         let free_space = line_width - indent - line.metrics.advance + line.metrics.hanging_advance;
 
         if !options.align_when_overflowing && free_space <= 0.0 {

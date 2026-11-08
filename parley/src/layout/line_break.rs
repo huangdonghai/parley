@@ -29,7 +29,9 @@ use crate::{
 
 use core::ops::Range;
 use parley_engine::Atom;
-use parley_engine::shape::{AutoSpaceClass, Character, SpacingTrimClass, Whitespace};
+use parley_engine::shape::{
+    AutoSpaceClass, Character, HangingPunctuationClass, SpacingTrimClass, Whitespace,
+};
 use smallvec::SmallVec;
 
 #[derive(Default)]
@@ -92,6 +94,21 @@ struct LineState {
     last_text_class: SpacingTrimClass,
     /// `text-autospace` class of the last text atom appended, for adjacent spacing.
     last_text_autospace_class: Option<AutoSpaceClass>,
+    /// `hanging-punctuation` class and advance of the last non-whitespace atom appended.
+    last_text_hanging_class: Option<HangingPunctuationClass>,
+    last_text_hanging_advance: f32,
+    last_text_hanging_cluster: Option<u32>,
+    last_hanging_cluster: Option<u32>,
+    last_text_hanging_style: crate::HangingPunctuation,
+    end_hanging: bool,
+    /// Whether the last text atom appended is also the last atom of its run.
+    last_text_hanging_run_end: bool,
+    /// Whether the last text atom appended is after an inline end inset.
+    last_text_hanging_blocked: bool,
+    /// Amount of the line's end punctuation currently hanging provisionally.
+    last_text_end_hanging_advance: f32,
+    first_hanging_cluster: Option<u32>,
+    first_hanging_advance: f32,
     /// `text-spacing-trim` policy of the last text atom's run.
     last_text_trim: crate::TextSpacingTrim,
     /// Whether the last text atom triggers adjacent collapsing for the next atom.
@@ -110,6 +127,17 @@ impl LineState {
         self.last_text_cluster = None;
         self.last_text_class = SpacingTrimClass::Other;
         self.last_text_autospace_class = None;
+        self.last_text_hanging_class = None;
+        self.last_text_hanging_advance = 0.0;
+        self.last_text_hanging_cluster = None;
+        self.last_hanging_cluster = None;
+        self.last_text_hanging_style = crate::HangingPunctuation::NONE;
+        self.end_hanging = false;
+        self.last_text_hanging_run_end = false;
+        self.last_text_hanging_blocked = false;
+        self.last_text_end_hanging_advance = 0.0;
+        self.first_hanging_cluster = None;
+        self.first_hanging_advance = 0.0;
         self.last_text_trim = crate::TextSpacingTrim::space_all();
         self.last_text_trigger = false;
         self.end_trimmed = false;
@@ -672,6 +700,10 @@ pub struct BreakerState {
     emergency_boundary: Option<PrevBoundaryState>,
     /// Reason the previous line was committed, if any (for `space-first`).
     prev_break_reason: Option<BreakReason>,
+    /// The inline-element id of the previous text atom, for deciding whether a
+    /// run introduces a new element (`hanging-punctuation: first` only applies
+    /// on the element's first formatted line).
+    last_text_span_id: Option<u64>,
 }
 
 impl Default for BreakerState {
@@ -693,6 +725,7 @@ impl Default for BreakerState {
             prev_boundary: None,
             emergency_boundary: None,
             prev_break_reason: None,
+            last_text_span_id: None,
         }
     }
 }
@@ -728,6 +761,19 @@ impl BreakerState {
                 &atom.characters()[0],
                 data.vertical,
             ));
+        if atom.characters()[0].whitespace == Whitespace::None {
+            self.line.last_text_hanging_class =
+                Some(atom.characters()[0].flags.hanging_punctuation_class());
+            self.line.last_text_hanging_advance = atom.advance();
+            self.line.last_text_hanging_cluster = Some(range.start);
+            self.line.last_text_hanging_style = data.styles[style_index as usize].hanging_punctuation;
+            let run_index = data.items[self.item_idx].index;
+            let run_range = data.shaped_text.runs()[run_index].shaped_clusters_range.clone();
+            self.line.last_text_hanging_run_end = range.end == run_range.end;
+            self.line.last_text_hanging_blocked =
+                data.styles[style_index as usize].hang_end_blocked;
+            self.last_text_span_id = Some(data.styles[style_index as usize].inline_element_id);
+        }
         let run_index = data.items[self.item_idx].index;
         self.line.last_text_trim = data.runs[run_index].spacing.text_spacing_trim();
         self.line.last_text_trigger = matches!(
@@ -756,6 +802,10 @@ impl BreakerState {
     pub fn append_inline_box_to_line(&mut self, next_x: f32, ascent: f32, descent: f32) {
         self.item_idx += 1;
         self.line.items.end += 1;
+        if next_x > self.line.x {
+            self.line.last_text_hanging_class = None;
+            self.line.last_text_hanging_advance = 0.0;
+        }
         self.line.last_text_autospace_class = None;
         self.line.x = next_x;
         self.line
@@ -1255,6 +1305,21 @@ impl<'a, B: Brush> BreakLines<'a, B> {
                         // are known here, end-of-line atoms are not (deferred via
                         // `end_unknown`, with the overflow retry below handling `allow-end`).
                         let is_first_text = self.state.line.first_text_cluster.is_none();
+                        let hanging_start_cluster = if is_first_text
+                            && style.hanging_punctuation.first()
+                            && !style.hang_start_blocked
+                            && Some(style.inline_element_id) != self.state.last_text_span_id
+                            && atom.shaped_clusters_range().start
+                                == slice.shaped_clusters_range().start
+                            && matches!(
+                                first_character.flags.hanging_punctuation_class(),
+                                HangingPunctuationClass::Opening
+                                    | HangingPunctuationClass::AmbiguousQuote
+                            ) {
+                            Some(atom.shaped_clusters_range().start)
+                        } else {
+                            None
+                        };
                         let atom_spacing = spacing.with_trim_line(TrimLineContext {
                             first_cluster: if is_first_text {
                                 Some(atom.shaped_clusters_range().start)
@@ -1263,11 +1328,15 @@ impl<'a, B: Brush> BreakLines<'a, B> {
                             },
                             last_cluster: None,
                             first_line: is_first_line,
+                            line_is_rtl: self.layout.data.base_level.is_rtl(),
+                            hanging_for_paint: false,
                             end_trimmed: false,
                             end_unknown: true,
                             prev_trigger: self.state.line.last_text_trigger,
                             next_trigger: false,
                             prev_autospace: self.state.line.last_text_autospace_class,
+                            first_punctuation_hanging_cluster: hanging_start_cluster,
+                            last_punctuation_hanging_cluster: None,
                         });
                         let advance = atom_spacing.atom_advance(&atom);
 
@@ -1288,6 +1357,10 @@ impl<'a, B: Brush> BreakLines<'a, B> {
                                 &self.layout.data,
                                 is_separator,
                             );
+                            if let Some(start) = hanging_start_cluster {
+                                self.state.line.first_hanging_cluster = Some(start);
+                                self.state.line.first_hanging_advance = atom.advance();
+                            }
                         }
                         // Else we attempt to line break:
                         //
@@ -1295,6 +1368,74 @@ impl<'a, B: Brush> BreakLines<'a, B> {
                         // in the line. If there is no such line-breaking opportunity (such as if wrapping is disabled), then
                         // we fall back to appending the content to the line anyway.
                         else {
+                            let is_run_end = atom.shaped_clusters_range().end
+                                == slice.shaped_clusters_range().end;
+                            let is_content_end = atom.shaped_clusters_range().end
+                                == self
+                                    .layout
+                                    .data
+                                    .shaped_text
+                                    .shaped_clusters()
+                                    .len() as u32;
+                            let blocked = style.hang_end_blocked && is_run_end;
+                            let hanging_end_cluster =
+                                (!blocked
+                                    && !self.state.line.end_hanging
+                                    && ((first_character.flags.hanging_punctuation_class()
+                                        == HangingPunctuationClass::StopOrComma
+                                        && (style.hanging_punctuation.allow_end()
+                                            || style.hanging_punctuation.force_end()))
+                                        || (style.hanging_punctuation.last()
+                                            && matches!(
+                                                first_character.flags.hanging_punctuation_class(),
+                                                HangingPunctuationClass::Closing
+                                                    | HangingPunctuationClass::AmbiguousQuote
+                                            )
+                                            && is_content_end)))
+                                .then_some(atom.shaped_clusters_range().start);
+                            if hanging_end_cluster.is_some() {
+                                let end_ctx = TrimLineContext {
+                                    first_cluster: self.state.line.first_text_cluster,
+                                    last_cluster: Some(atom.shaped_clusters_range().end),
+                                    first_line: is_first_line,
+                                    line_is_rtl: self.layout.data.base_level.is_rtl(),
+                                    hanging_for_paint: false,
+                                    end_trimmed: false,
+                                    end_unknown: false,
+                                    prev_trigger: self.state.line.last_text_trigger,
+                                    next_trigger: false,
+                                    prev_autospace: self.state.line.last_text_autospace_class,
+                                    first_punctuation_hanging_cluster: hanging_start_cluster,
+                                    last_punctuation_hanging_cluster: hanging_end_cluster,
+                                };
+                                let hanging_next_x = self.state.line.x
+                                    + spacing.with_trim_line(end_ctx).atom_advance(&atom);
+                                if hanging_next_x <= max_advance {
+                                    if max_height_exceeded {
+                                        return self.max_height_break_data(line_height);
+                                    }
+                                    self.state.append_atom_to_line(
+                                        &atom,
+                                        hanging_next_x,
+                                        style_index,
+                                        &self.layout.data,
+                                        is_separator,
+                                    );
+                                    self.state.line.end_hanging = true;
+                                    self.state.line.last_hanging_cluster = hanging_end_cluster;
+                                    let end_of_text = self.state.cluster_idx
+                                        >= self.layout.data.shaped_text.shaped_clusters().len() as u32;
+                                    let line = self.start_new_line(
+                                        BreakReason::Regular,
+                                        max_advance,
+                                        line_indent,
+                                    );
+                                    if end_of_text {
+                                        self.done = true;
+                                    }
+                                    return line;
+                                }
+                            }
                             // `allow-end`/`trim-end`: a closing atom that does not fit
                             // full-width may be trimmed to end the line here instead
                             // of wrapping to the next line.
@@ -1306,11 +1447,15 @@ impl<'a, B: Brush> BreakLines<'a, B> {
                                     first_cluster: self.state.line.first_text_cluster,
                                     last_cluster: Some(atom.shaped_clusters_range().end),
                                     first_line: is_first_line,
+                                    line_is_rtl: self.layout.data.base_level.is_rtl(),
+                                    hanging_for_paint: false,
                                     end_trimmed: true,
                                     end_unknown: false,
                                     prev_trigger: self.state.line.last_text_trigger,
                                     next_trigger: false,
                                     prev_autospace: self.state.line.last_text_autospace_class,
+                                    first_punctuation_hanging_cluster: None,
+                                    last_punctuation_hanging_cluster: None,
                                 };
                                 let trimmed_next_x = self.state.line.x
                                     + spacing.with_trim_line(end_ctx).atom_advance(&atom);
@@ -1776,7 +1921,11 @@ impl<B: Brush> Drop for BreakLines<'_, B> {
             let indent_extra = line.metrics.indent.max(0.0);
             let line_max = line.metrics.inline_min_coord + line.metrics.advance + indent_extra;
             layout_full_width = layout_full_width.max(line_max);
-            layout_width = layout_width.max(line_max - line.metrics.hanging_advance);
+            layout_width = layout_width.max(
+                line_max
+                    - line.metrics.hanging_advance
+                    - line.metrics.start_hanging_advance,
+            );
             height += line.metrics.line_height as f64;
         }
 
@@ -1943,12 +2092,76 @@ fn commit_line<B: Brush>(
     if needs_reorder && end_item_idx - start_item_idx > 1 {
         reorder_line_items(&mut lines.line_items[start_item_idx..end_item_idx]);
     }
-
     // `trim-end` applies retroactively: the last atom's advance was measured
     // untrimmed (its end position was not yet known), but painting must trim it.
     if state.last_text_class == SpacingTrimClass::Closing && state.last_text_trim.end_trims() {
-        state.end_trimmed = true;
+        if state.last_text_hanging_style.last()
+            && state.last_text_hanging_class.is_some_and(|class| {
+                matches!(
+                    class,
+                    HangingPunctuationClass::Closing | HangingPunctuationClass::AmbiguousQuote
+                )
+            })
+            && (break_reason == BreakReason::None
+                || state.end_hanging)
+        {
+            // hanging punctuation gives up its advance instead of trimming
+        } else {
+            state.end_trimmed = true;
+        }
     }
+
+    // The breaker sets `end_hanging` when it keeps an overflowing glyph on the
+    // line by hanging it; its `state.x` then already excludes the glyph, so
+    // there is nothing more to subtract from the line's advance here.
+    let breaker_hung = state.end_hanging;
+    let hanging_punctuation_advance =
+        if state.last_text_hanging_class.is_some_and(|class| {
+            matches!(
+                class,
+                HangingPunctuationClass::StopOrComma
+                    | HangingPunctuationClass::Closing
+                    | HangingPunctuationClass::AmbiguousQuote
+            )
+        }) {
+            let property = state.last_text_hanging_style;
+            let hangs = match state.last_text_hanging_class {
+                Some(HangingPunctuationClass::StopOrComma) => {
+                    property.force_end()
+                        || (property.allow_end()
+                            && state.x - state.last_text_hanging_advance <= max_advance
+                            && state.x > max_advance)
+                }
+                Some(HangingPunctuationClass::Closing | HangingPunctuationClass::AmbiguousQuote) => {
+                    property.last() && break_reason == BreakReason::None
+                }
+                _ => false,
+            };
+            // A non-zero inline end inset of the atom's element blocks hanging
+            // here (CSS Text 3 §8.2.1); at wrap points the inset is only on the
+            // element's last fragment, which this finish-line check narrows to atoms
+            // that end their run.
+            let hangs =
+                hangs && !(state.last_text_hanging_blocked && state.last_text_hanging_run_end);
+            if breaker_hung || hangs {
+                if breaker_hung {
+                    0.0
+                } else {
+                    state.last_text_hanging_advance
+                }
+            } else {
+                0.0
+            }
+        } else {
+            0.0
+        };
+    let end_hanging = breaker_hung || hanging_punctuation_advance != 0.0;
+    state.last_hanging_cluster = end_hanging.then_some(
+        state
+            .last_text_hanging_cluster
+            .or(state.last_text_cluster)
+            .unwrap_or(0),
+    );
 
     lines.lines.push(LineData {
         item_range: start_item_idx..end_item_idx,
@@ -1958,15 +2171,21 @@ fn commit_line<B: Brush>(
         first_text_cluster: state.first_text_cluster,
         last_text_cluster: state.last_text_cluster,
         end_trimmed: state.end_trimmed,
+        end_hanging,
+        first_hanging_cluster: state.first_hanging_cluster,
+        last_hanging_cluster: state.last_hanging_cluster,
         num_justification_opportunities,
         justification: Justification {
-            justification_end_cluster,
+            justification_end_cluster: state.last_hanging_cluster.map_or(justification_end_cluster, |cluster| {
+                justification_end_cluster.min(cluster)
+            }),
             ..Justification::NONE
         },
         metrics: LineMetrics {
             indent: line_indent,
             advance: state.x,
-            hanging_advance,
+            hanging_advance: hanging_advance + hanging_punctuation_advance,
+            start_hanging_advance: state.first_hanging_advance,
             ..Default::default()
         },
         aligned_subtree_offsets: 0..0,

@@ -8,7 +8,7 @@ use parley_engine::{
     shape::{AutoSpaceClass, Character, SpacingTrimClass, Whitespace},
 };
 
-use crate::{TextAutospace, TextSpacingTrim};
+use crate::{HangingPunctuation, TextAutospace, TextSpacingTrim};
 
 /// Whether the whitespace is a word separator.
 ///
@@ -92,6 +92,8 @@ pub(crate) struct Spacing {
     pub(crate) text_spacing_trim: TextSpacingTrim,
     /// CSS `text-autospace`.
     pub(crate) text_autospace: TextAutospace,
+    /// CSS `hanging-punctuation`.
+    pub(crate) hanging_punctuation: HangingPunctuation,
     /// The amount `text-autospace` adds in horizontal and vertical writing modes.
     pub(crate) autospace_advance_horizontal: f32,
     pub(crate) autospace_advance_vertical: f32,
@@ -117,6 +119,7 @@ impl Spacing {
             letter,
             text_spacing_trim,
             text_autospace: TextAutospace::NoAutospace,
+            hanging_punctuation: HangingPunctuation::NONE,
             autospace_advance_horizontal: 0.0,
             autospace_advance_vertical: 0.0,
             font_size,
@@ -135,6 +138,12 @@ impl Spacing {
         self.text_autospace = text_autospace;
         self.autospace_advance_horizontal = horizontal;
         self.autospace_advance_vertical = vertical;
+        self
+    }
+
+    /// Set whether this run uses `hanging-punctuation`.
+    pub(crate) const fn with_hanging(mut self, hanging_punctuation: HangingPunctuation) -> Self {
+        self.hanging_punctuation = hanging_punctuation;
         self
     }
 
@@ -168,6 +177,7 @@ impl Spacing {
     pub(crate) const fn is_zero(self) -> bool {
         self.word == 0.
             && self.letter == 0.
+            && self.hanging_punctuation.is_none()
             && match self.text_autospace {
                 TextAutospace::NoAutospace => true,
                 TextAutospace::Normal => {
@@ -222,6 +232,12 @@ pub(crate) struct TrimLineContext {
     pub(crate) last_cluster: Option<u32>,
     /// Whether this line is the first line of the block or follows a forced break.
     pub(crate) first_line: bool,
+    /// Whether the line's inline base direction is right-to-left: the start
+    /// edge is then the visually right (bottom in vertical) one.
+    pub(crate) line_is_rtl: bool,
+    /// Whether this context positions glyphs for painting, as opposed to
+    /// measuring advances while breaking lines.
+    pub(crate) hanging_for_paint: bool,
     /// Whether the line's last closing atom was trimmed to fit (`allow-end`).
     pub(crate) end_trimmed: bool,
     /// Whether the end of the line is not yet known (line-breaking measurement).
@@ -232,6 +248,10 @@ pub(crate) struct TrimLineContext {
     pub(crate) next_trigger: bool,
     /// The `text-autospace` class of the preceding text on this line.
     pub(crate) prev_autospace: Option<AutoSpaceClass>,
+    /// Shaped-cluster index of the hanging opening punctuation, if any.
+    pub(crate) first_punctuation_hanging_cluster: Option<u32>,
+    /// Shaped-cluster index of the hanging punctuation at the line end, if any.
+    pub(crate) last_punctuation_hanging_cluster: Option<u32>,
 }
 
 impl TrimLineContext {
@@ -240,11 +260,15 @@ impl TrimLineContext {
         first_cluster: None,
         last_cluster: None,
         first_line: false,
+        line_is_rtl: false,
+        hanging_for_paint: false,
         end_trimmed: false,
         end_unknown: false,
         prev_trigger: false,
         next_trigger: false,
         prev_autospace: None,
+        first_punctuation_hanging_cluster: None,
+        last_punctuation_hanging_cluster: None,
     };
 }
 
@@ -313,6 +337,43 @@ impl EffectiveSpacing {
     pub(crate) fn gaps(self, atom: &Atom<'_>) -> Gaps {
         let whitespace = atom.characters()[0].whitespace;
         let mut gaps = self.spacing.gaps(whitespace);
+        let hanging_class = atom.characters()[0].flags.hanging_punctuation_class();
+        // `before` is the visually left (top in vertical) side and `after` the visually
+        // right one; the hanging edge is the line's start or end edge, which is the
+        // visually right one in RTL text and the left one otherwise.
+        if self.trim_line.first_punctuation_hanging_cluster == Some(atom.shaped_clusters_range().start)
+            && matches!(
+                hanging_class,
+                parley_engine::shape::HangingPunctuationClass::Opening
+                    | parley_engine::shape::HangingPunctuationClass::AmbiguousQuote
+            )
+        {
+            if self.trim_line.line_is_rtl {
+                gaps.after = -atom.advance();
+            } else {
+                gaps.before = -atom.advance();
+            }
+        }
+        if self.trim_line.last_punctuation_hanging_cluster == Some(atom.shaped_clusters_range().start)
+            && matches!(
+                hanging_class,
+                parley_engine::shape::HangingPunctuationClass::StopOrComma
+                    | parley_engine::shape::HangingPunctuationClass::Closing
+                    | parley_engine::shape::HangingPunctuationClass::AmbiguousQuote
+            )
+        {
+            // In RTL text the hanging glyph is the visually first atom on the line,
+            // so shifting it by a negative gap would also pull every atom after it
+            // along. At paint time it needs no gap: the line offset already places
+            // it past the line's end edge, and its own width carries the atoms after
+            // it to the line's edge. Only the measuring path subtracts it.
+            if self.trim_line.line_is_rtl && self.trim_line.hanging_for_paint {
+                gaps.before = 0.0;
+                gaps.after = 0.0;
+            } else {
+                gaps.after = -atom.advance();
+            }
+        }
 
         // Justification expands word separators and, for scripts that do not separate words with
         // spaces, the boundary between two typographic character units (CSS Text 3 6.4.5).

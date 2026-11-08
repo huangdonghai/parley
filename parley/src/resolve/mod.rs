@@ -19,7 +19,8 @@ use crate::style::TextStyle;
 use crate::util::nearly_eq;
 use crate::{LineBreak, LineHeight, OverflowWrap, VerticalAlign, layout};
 use crate::{
-    TextAutospace, TextOrientation, TextSpacingTrim, TextWrapMode, WhiteSpaceCollapse, WordBreak,
+    HangingPunctuation, TextAutospace, TextOrientation, TextSpacingTrim, TextWrapMode,
+    WhiteSpaceCollapse, WordBreak,
 };
 use core::borrow::Borrow;
 use core::ops::Range;
@@ -168,6 +169,7 @@ impl ResolveContext {
             StyleProperty::LetterSpacing(value) => LetterSpacing(*value * scale),
             StyleProperty::TextSpacingTrim(value) => TextSpacingTrim(*value),
             StyleProperty::TextAutospace(value) => TextAutospace(*value),
+            StyleProperty::HangingPunctuation(value) => HangingPunctuation(*value),
             StyleProperty::TextOrientation(value) => TextOrientation(*value),
             StyleProperty::TextCombineUpright(value) => TextCombineUpright(*value),
             StyleProperty::WordBreak(value) => WordBreak(*value),
@@ -213,6 +215,10 @@ impl ResolveContext {
             letter_spacing: raw_style.letter_spacing * scale,
             text_spacing_trim: raw_style.text_spacing_trim,
             text_autospace: raw_style.text_autospace,
+            hanging_punctuation: raw_style.hanging_punctuation,
+            hang_start_blocked: raw_style.hang_start_blocked,
+            hang_end_blocked: raw_style.hang_end_blocked,
+            inline_element_id: raw_style.inline_element_id,
             text_orientation: raw_style.text_orientation,
             text_combine_upright: raw_style.text_combine_upright,
             word_break: raw_style.word_break,
@@ -404,6 +410,8 @@ pub(crate) enum ResolvedProperty<B: Brush> {
     TextSpacingTrim(TextSpacingTrim),
     /// CSS `text-autospace`.
     TextAutospace(TextAutospace),
+    /// CSS `hanging-punctuation`.
+    HangingPunctuation(HangingPunctuation),
     /// CSS `text-orientation`.
     TextOrientation(TextOrientation),
     /// CSS `text-combine-upright`.
@@ -460,6 +468,14 @@ pub(crate) struct ResolvedStyle<B: Brush> {
     pub(crate) text_spacing_trim: TextSpacingTrim,
     /// CSS `text-autospace`.
     pub(crate) text_autospace: TextAutospace,
+    /// CSS `hanging-punctuation`.
+    pub(crate) hanging_punctuation: HangingPunctuation,
+    /// Whether an inline start inset blocks hanging at the line start.
+    pub(crate) hang_start_blocked: bool,
+    /// Whether an inline end inset blocks hanging at the line end.
+    pub(crate) hang_end_blocked: bool,
+    /// The inline element this run belongs to.
+    pub(crate) inline_element_id: u64,
     /// CSS `text-orientation`.
     pub(crate) text_orientation: TextOrientation,
     /// CSS `text-combine-upright`.
@@ -504,6 +520,7 @@ impl<B: Brush> ResolvedStyle<B> {
             LetterSpacing(value) => self.letter_spacing = value,
             TextSpacingTrim(value) => self.text_spacing_trim = value,
             TextAutospace(value) => self.text_autospace = value,
+            HangingPunctuation(value) => self.hanging_punctuation = value,
             TextOrientation(value) => self.text_orientation = value,
             TextCombineUpright(value) => self.text_combine_upright = value,
             WordBreak(value) => self.word_break = value,
@@ -540,6 +557,7 @@ impl<B: Brush> ResolvedStyle<B> {
             LetterSpacing(value) => nearly_eq(self.letter_spacing, *value),
             TextSpacingTrim(value) => self.text_spacing_trim == *value,
             TextAutospace(value) => self.text_autospace == *value,
+            HangingPunctuation(value) => self.hanging_punctuation == *value,
             TextOrientation(value) => self.text_orientation == *value,
             TextCombineUpright(value) => self.text_combine_upright == *value,
             WordBreak(value) => self.word_break == *value,
@@ -563,6 +581,10 @@ impl<B: Brush> ResolvedStyle<B> {
             white_space_collapse: self.white_space_collapse,
             text_spacing_trim: self.text_spacing_trim,
             text_autospace: self.text_autospace,
+            hanging_punctuation: self.hanging_punctuation,
+            hang_start_blocked: self.hang_start_blocked,
+            hang_end_blocked: self.hang_end_blocked,
+            inline_element_id: self.inline_element_id,
             locale: self.locale,
         }
     }

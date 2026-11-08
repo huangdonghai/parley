@@ -23,7 +23,9 @@ use crate::{
 
 use super::{
     Character, CharacterFlags, ShapedCluster, ShapedClusterFlags, SpacingTrimClass, Whitespace,
-    atom::ShapedSlice, data::auto_space_class, shaper::ShapeOptions,
+    atom::ShapedSlice,
+    data::{auto_space_class, hanging_punctuation_class},
+    shaper::ShapeOptions,
 };
 
 /// The per-style inputs `text-autospace` needs, resolved by Parley from each
@@ -36,6 +38,8 @@ pub struct AutoSpaceStyle {
     pub orientation: TextOrientation,
     /// Whether this style's characters are a `text-combine-upright` composition.
     pub combined: bool,
+    /// Whether this style asks for hanging punctuation.
+    pub hanging: bool,
 }
 
 /// Metrics that apply to the glyphs of a font.
@@ -196,16 +200,20 @@ impl ShapedText {
         self.normalized_coords.clear();
     }
 
-    /// Classify every character of `text` for `text-autospace` (CSS Text 4 §8.4).
+    /// Classify every character of `text` for `text-autospace` and `hanging-punctuation`.
     ///
     /// `styles` is indexed by each character's style id; a character is classified when its
-    /// style enables `text-autospace`, and marked upright when its style combines upright
+    /// style enables either property, and marked upright when its style combines upright
     /// or when its `text-orientation` says so in a vertical writing mode. Calling this before
     /// line breaking keeps the character classification to one pass and lets the spacing
     /// calculation read it from packed flags instead of looking properties up again. It is
-    /// cheap when no style enables the property: every flag stays at its default.
-    pub fn set_autospace_classes(&mut self, text: &str, styles: &[AutoSpaceStyle]) {
-        if styles.is_empty() || !styles.iter().any(|style| style.enabled || style.combined) {
+    /// cheap when neither property is enabled: every flag stays at its default.
+    pub fn set_text_spacing_classes(&mut self, text: &str, styles: &[AutoSpaceStyle]) {
+        if styles.is_empty()
+            || !styles
+                .iter()
+                .any(|style| style.enabled || style.combined || style.hanging)
+        {
             return;
         }
 
@@ -216,13 +224,20 @@ impl ShapedText {
                 continue;
             };
 
-            if style.enabled {
+            if style.enabled || style.hanging {
                 let properties = Properties::get(ch);
-                character.flags.set_auto_space_class(auto_space_class(
-                    ch,
-                    properties,
-                    east_asian_width.get(ch),
-                ));
+                if style.enabled {
+                    character.flags.set_auto_space_class(auto_space_class(
+                        ch,
+                        properties,
+                        east_asian_width.get(ch),
+                    ));
+                }
+                if style.hanging {
+                    character
+                        .flags
+                        .set_hanging_punctuation_class(hanging_punctuation_class(ch, properties));
+                }
             }
 
             if style.combined {

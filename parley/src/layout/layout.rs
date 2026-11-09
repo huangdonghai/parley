@@ -1,7 +1,7 @@
 // Copyright 2025 the Parley Authors
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
-use crate::InlineBox;
+use crate::{InlineBox, InlineBoxKind};
 use crate::layout::alignment::align;
 use crate::layout::data::LayoutData;
 use crate::layout::{
@@ -124,6 +124,31 @@ impl<B: Brush> Layout<B> {
         })
     }
 
+    /// The root span's used font size and line height, in layout units.
+    pub fn root_span_size_and_line_height(&self) -> Option<(f32, f32)> {
+        self.data.style_metrics.first().map(|metrics| {
+            (
+                metrics.font_size,
+                metrics.over + metrics.under,
+            )
+        })
+    }
+
+    /// The root span's over/under line-box extents, in layout units.
+    #[doc(hidden)]
+    pub fn root_span_line_box_extents(&self) -> Option<(f32, f32)> {
+        self.data
+            .style_metrics
+            .first()
+            .map(|metrics| (metrics.over, metrics.under))
+    }
+
+    /// Whether this layout advances text in a vertical writing mode.
+    #[doc(hidden)]
+    pub fn is_vertical(&self) -> bool {
+        self.data.vertical
+    }
+
     /// Returns the length of the source text, in bytes.
     pub fn text_len(&self) -> usize {
         self.data.text_len
@@ -212,6 +237,49 @@ impl<B: Brush> Layout<B> {
     /// Mutable iterator over the inline boxes in text index order.
     pub fn inline_boxes_mut(&mut self) -> impl ExactSizeIterator<Item = &mut InlineBox> + '_ {
         self.data.inline_boxes.iter_mut().map(|b| &mut b.inline_box)
+    }
+
+    /// Sets the min/max content-width contribution of an inline box when its
+    /// intrinsic width differs from its measured inline-box width.
+    #[doc(hidden)]
+    pub fn set_inline_box_intrinsic_widths(&mut self, index: usize, min: f32, max: f32) {
+        if let Some(layout_box) = self.data.inline_boxes.get_mut(index) {
+            layout_box.intrinsic_widths = Some((min, max.max(min)));
+        }
+    }
+
+    /// Sets the natural row widths and per-row justification-opportunity counts
+    /// for a custom composition.
+    #[doc(hidden)]
+    pub fn set_inline_box_justification_profile(
+        &mut self,
+        index: usize,
+        first_width: f32,
+        first_opportunities: u32,
+        second_width: f32,
+        second_opportunities: u32,
+    ) {
+        if let Some(layout_box) = self.data.inline_boxes.get_mut(index) {
+            layout_box.justification_profile = Some((
+                first_width,
+                first_opportunities,
+                second_width,
+                second_opportunities,
+                layout_box.inline_box.width,
+            ));
+        }
+    }
+
+    /// Resets a custom in-flow placeholder before a new line-breaking pass.
+    #[doc(hidden)]
+    pub fn reset_custom_inline_box(&mut self, index: usize) {
+        if let Some(layout_box) = self.data.inline_boxes.get_mut(index) {
+            layout_box.inline_box.kind = InlineBoxKind::CustomInFlow;
+            layout_box.inline_box.width = 0.0;
+            layout_box.inline_box.height = 0.0;
+            layout_box.inline_box.baseline = None;
+            layout_box.justification_profile = None;
+        }
     }
 
     /// Returns an iterator over the lines in the layout.

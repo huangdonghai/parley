@@ -37,6 +37,12 @@ impl<'a, B: Brush> Line<'a, B> {
         self.data.text_range.clone()
     }
 
+    /// The amount added to each justification opportunity on this line.
+    #[doc(hidden)]
+    pub fn justification_amount_per_opportunity(&self) -> f32 {
+        self.data.justification.amount_per_opportunity
+    }
+
     /// Returns the number of items in the line.
     pub fn len(&self) -> usize {
         self.data.item_range.len()
@@ -87,6 +93,11 @@ impl<'a, B: Brush> Line<'a, B> {
     pub(crate) fn inline_box_top(&self, index: usize) -> f32 {
         let layout_box = &self.layout.data.inline_boxes[index];
         let inline_box = &layout_box.inline_box;
+        if inline_box.kind == InlineBoxKind::CustomInFlowCentered {
+            return (self.data.metrics.block_min_coord + self.data.metrics.block_max_coord
+                - inline_box.height)
+                * 0.5;
+        }
         match inline_box.vertical_align.shift {
             BaselineShift::Top => self.data.metrics.block_min_coord,
             BaselineShift::Bottom => self.data.metrics.block_max_coord - inline_box.height,
@@ -148,6 +159,26 @@ impl<'a, B: Brush> Line<'a, B> {
             item_index: 0,
             atoms: None,
             offset: 0.,
+            shaped_range: None,
+            end_item_index: None,
+        }
+    }
+
+    /// Returns the glyph runs for one text item, restricted to an atom-aligned
+    /// shaped-cluster range.
+    #[doc(hidden)]
+    pub fn items_for_text_item(
+        &self,
+        item_index: usize,
+        shaped_range: Range<u32>,
+    ) -> impl Iterator<Item = PositionedLayoutItem<'a, B>> + 'a + Clone + use<'a, B> {
+        GlyphRunIter {
+            line: self.clone(),
+            item_index,
+            atoms: None,
+            offset: 0.,
+            shaped_range: Some(shaped_range),
+            end_item_index: Some(item_index.saturating_add(1)),
         }
     }
 }
@@ -269,6 +300,8 @@ pub enum PositionedLayoutItem<'a, B: Brush> {
 /// The computed position of an inline box within a layout
 #[derive(Debug, Clone)]
 pub struct PositionedInlineBox {
+    /// Index of this box in [`Layout::inline_boxes`](crate::Layout::inline_boxes).
+    pub index: usize,
     pub x: f32,
     pub y: f32,
     pub width: f32,
@@ -420,8 +453,11 @@ struct AtomIter<'a> {
 }
 
 impl<'a> AtomIter<'a> {
-    fn new<B: Brush>(run: Run<'a, B>) -> Self {
-        let slice = run.line_slice();
+    fn new_for_range<B: Brush>(run: Run<'a, B>, range: Option<Range<u32>>) -> Self {
+        let slice = match range {
+            Some(range) => run.line_slice().narrow(range),
+            None => run.line_slice(),
+        };
         let is_rtl = run.is_rtl();
         Self {
             atoms: if is_rtl {
@@ -478,6 +514,10 @@ struct GlyphRunIter<'a, B: Brush> {
     /// not yet yielded as part of a glyph run. `None` before entering a run.
     atoms: Option<AtomIter<'a>>,
     offset: f32,
+    /// Optional atom-aligned shaped-cluster range used by note-row painting.
+    shaped_range: Option<Range<u32>>,
+    /// Optional exclusive item bound for range-indexed iteration.
+    end_item_index: Option<usize>,
 }
 
 impl<'a, B: Brush> Iterator for GlyphRunIter<'a, B> {
@@ -485,9 +525,16 @@ impl<'a, B: Brush> Iterator for GlyphRunIter<'a, B> {
 
     fn next(&mut self) -> Option<Self::Item> {
         loop {
+            if self.end_item_index.is_some_and(|end| self.item_index >= end) {
+                return None;
+            }
             let item = self.line.item(self.item_index)?;
             match item {
                 LineItem::InlineBox(inline_box) => {
+                    if self.shaped_range.is_some() {
+                        self.item_index += 1;
+                        continue;
+                    }
                     let x = self.offset
                         + self.line.data.metrics.inline_min_coord
                         + self.line.data.metrics.offset;
@@ -499,11 +546,15 @@ impl<'a, B: Brush> Iterator for GlyphRunIter<'a, B> {
                     self.item_index += 1;
                     if matches!(
                         inline_box.kind,
-                        InlineBoxKind::InFlow | InlineBoxKind::InlineEdge
+                        InlineBoxKind::InFlow
+                            | InlineBoxKind::CustomInFlow
+                            | InlineBoxKind::CustomInFlowCentered
+                            | InlineBoxKind::InlineEdge
                     ) {
                         self.offset += inline_box.width;
                     }
                     return Some(PositionedLayoutItem::InlineBox(PositionedInlineBox {
+                        index: box_index,
                         x,
                         y,
                         width: inline_box.width,
@@ -514,10 +565,25 @@ impl<'a, B: Brush> Iterator for GlyphRunIter<'a, B> {
                     }));
                 }
                 LineItem::Run(run) => {
+                    let selected_range = if let Some(range) = &self.shaped_range {
+                        let run_range = run.line_slice().shaped_clusters_range();
+                        let start = range.start.max(run_range.start);
+                        let end = range.end.min(run_range.end);
+                        if start >= end {
+                            self.item_index += 1;
+                            self.atoms = None;
+                            continue;
+                        }
+                        Some(start..end)
+                    } else {
+                        None
+                    };
                     // TODO: style indices are taken from the atom's first character, matching
                     // `Cluster::style_index`. We could get the style index from `parley_engine`'s
                     // `ShapedCluster` instead, which would be somewhat finer-grained.
-                    let atoms = self.atoms.get_or_insert_with(|| AtomIter::new(run));
+                    let atoms = self
+                        .atoms
+                        .get_or_insert_with(|| AtomIter::new_for_range(run, selected_range));
 
                     // Styles are uniform within an atom, so glyph runs always end on atom
                     // boundaries and the iterator only needs to resume at atom granularity.

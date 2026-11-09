@@ -567,17 +567,25 @@ impl ContentWidthsMeasurer {
                     }
                 }
                 LayoutItemKind::InlineBox => {
-                    let inline_box = &layout_data.inline_boxes[item.index].inline_box;
+                    let layout_box = &layout_data.inline_boxes[item.index];
+                    let inline_box = &layout_box.inline_box;
                     if inline_box.kind == InlineBoxKind::InlineEdge {
                         self.running_min_width += inline_box.width;
                         self.running_max_width += inline_box.width;
                         continue;
                     }
-                    if inline_box.kind == InlineBoxKind::InFlow {
+                    if matches!(
+                        inline_box.kind,
+                        InlineBoxKind::InFlow
+                            | InlineBoxKind::CustomInFlow
+                            | InlineBoxKind::CustomInFlowCentered
+                    ) {
                         let next = items.as_slice().iter().find(|next| {
                             next.kind == LayoutItemKind::TextRun
-                                || layout_data.inline_boxes[next.index].inline_box.kind
-                                    == InlineBoxKind::InFlow
+                                || matches!(
+                                    layout_data.inline_boxes[next.index].inline_box.kind,
+                                    InlineBoxKind::InFlow | InlineBoxKind::CustomInFlowCentered
+                                )
                         });
                         // A forced break right after a box suppresses the box's soft wrap
                         // opportunity.
@@ -589,7 +597,11 @@ impl ContentWidthsMeasurer {
                             Some(_) => true,
                             None => false,
                         };
-                        self.measure_inline_box(inline_box, followed_by_inline_content);
+                        self.measure_inline_box(
+                            inline_box,
+                            followed_by_inline_content,
+                            layout_box.intrinsic_widths,
+                        );
                     }
                 }
             }
@@ -758,7 +770,12 @@ impl ContentWidthsMeasurer {
         self.line_has_content = empty_at != clusters.len();
     }
 
-    fn measure_inline_box(&mut self, inline_box: &InlineBox, followed_by_inline_content: bool) {
+    fn measure_inline_box(
+        &mut self,
+        inline_box: &InlineBox,
+        followed_by_inline_content: bool,
+        intrinsic_widths: Option<(f32, f32)>,
+    ) {
         // Inline boxes have soft wrap opportunities on both sides.
         let wraps = self.text_wrap_mode == TextWrapMode::Wrap;
         if wraps {
@@ -766,8 +783,16 @@ impl ContentWidthsMeasurer {
         }
         // Inline boxes don't hang.
         self.running_hanging_whitespace = 0.0;
-        self.running_min_width += inline_box.width;
-        self.running_max_width += inline_box.width;
+        let (min_content_width, max_content_width) =
+            intrinsic_widths.unwrap_or((inline_box.width, inline_box.width));
+        let min_width = if wraps {
+            min_content_width
+        } else {
+            max_content_width
+        };
+        let max_width = max_content_width;
+        self.running_min_width += min_width;
+        self.running_max_width += max_width;
         self.line_has_content = true;
         if wraps && followed_by_inline_content {
             self.soft_break(true);

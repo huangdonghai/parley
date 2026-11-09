@@ -190,6 +190,215 @@ impl<'a, B: Brush> Cluster<'a, B> {
         spacing.grapheme_advance(&self.atom, self.grapheme, self.is_rtl())
     }
 
+    #[doc(hidden)]
+    pub fn advance_with_note_line_range(
+        &self,
+        first_cluster: u32,
+        last_cluster: u32,
+        first_line: bool,
+        line_start: bool,
+        line_end: bool,
+    ) -> f32 {
+        self.run
+            .line_spacing()
+            .with_note_line_range(
+                first_cluster,
+                last_cluster,
+                first_line,
+                line_start,
+                line_end,
+            )
+            .grapheme_advance(&self.atom, self.grapheme, self.is_rtl())
+    }
+
+    #[doc(hidden)]
+    pub fn advance_with_note_line_range_and_hanging(
+        &self,
+        first_cluster: u32,
+        last_cluster: u32,
+        first_line: bool,
+        line_start: bool,
+        line_end: bool,
+        hanging_start: bool,
+        hanging_end: bool,
+        hanging_for_paint: bool,
+    ) -> f32 {
+        let range = self.shaped_clusters_range();
+        self.run
+            .line_spacing()
+            .with_note_line_range(
+                first_cluster,
+                last_cluster,
+                first_line,
+                line_start,
+                line_end,
+            )
+            .with_note_line_hanging(
+                hanging_start.then_some(range.start),
+                hanging_end.then_some(range.start),
+                hanging_for_paint,
+            )
+            .grapheme_advance(&self.atom, self.grapheme, self.is_rtl())
+    }
+
+    #[doc(hidden)]
+    pub fn spacing_gaps_with_note_line_range(
+        &self,
+        first_cluster: u32,
+        last_cluster: u32,
+        first_line: bool,
+        line_start: bool,
+        line_end: bool,
+    ) -> (f32, f32) {
+        let gaps = self
+            .run
+            .line_spacing()
+            .with_note_line_range(
+                first_cluster,
+                last_cluster,
+                first_line,
+                line_start,
+                line_end,
+            )
+            .grapheme_gaps(&self.atom, self.grapheme, self.is_rtl());
+        (gaps.before, gaps.after)
+    }
+
+    #[doc(hidden)]
+    pub fn spacing_gaps_with_note_line_range_and_hanging(
+        &self,
+        first_cluster: u32,
+        last_cluster: u32,
+        first_line: bool,
+        line_start: bool,
+        line_end: bool,
+        hanging_start: bool,
+        hanging_end: bool,
+        hanging_for_paint: bool,
+    ) -> (f32, f32) {
+        let range = self.shaped_clusters_range();
+        let gaps = self
+            .run
+            .line_spacing()
+            .with_note_line_range(
+                first_cluster,
+                last_cluster,
+                first_line,
+                line_start,
+                line_end,
+            )
+            .with_note_line_hanging(
+                hanging_start.then_some(range.start),
+                hanging_end.then_some(range.start),
+                hanging_for_paint,
+            )
+            .grapheme_gaps(&self.atom, self.grapheme, self.is_rtl());
+        (gaps.before, gaps.after)
+    }
+
+    #[doc(hidden)]
+    pub fn shaped_clusters_range(&self) -> Range<u32> {
+        self.atom.shaped_clusters_range()
+    }
+
+    /// The used line height of this cluster's style, in layout units.
+    #[doc(hidden)]
+    pub fn line_height(&self) -> f32 {
+        self.run
+            .layout
+            .data
+            .style_metrics
+            .get(usize::from(self.style_index()))
+            .map_or(0.0, |metrics| metrics.over + metrics.under)
+    }
+
+    /// The block-axis line-box extents contributed by this cluster and its
+    /// style ancestors, measured from the root span's baseline.
+    #[doc(hidden)]
+    pub fn line_box_over_under(&self) -> (f32, f32) {
+        let line = self.line();
+        let root_baseline = line.metrics().baseline;
+        let mut style_index = self.style_index();
+        let mut over: f32 = 0.0;
+        let mut under: f32 = 0.0;
+        loop {
+            if let Some(metrics) = self
+                .run
+                .layout
+                .data
+                .style_metrics
+                .get(usize::from(style_index))
+            {
+                let baseline_delta = line.style_baseline(style_index) - root_baseline;
+                over = over.max(metrics.over - baseline_delta);
+                under = under.max(metrics.under + baseline_delta);
+            }
+            let Some(style) = self.run.layout.data.styles.get(usize::from(style_index)) else {
+                break;
+            };
+            if style_index == 0 {
+                break;
+            }
+            style_index = style.parent;
+        }
+        (over, under)
+    }
+
+    /// Whether this cluster's style requests `hanging-punctuation: force-end`
+    /// for its punctuation class.
+    #[doc(hidden)]
+    pub fn force_hanging_at_line_end(&self) -> bool {
+        use parley_engine::shape::HangingPunctuationClass;
+
+        let style = self.style();
+        !style.hang_end_blocked
+            && style.hanging_punctuation.force_end()
+            && self.first_character().flags.hanging_punctuation_class()
+                == HangingPunctuationClass::StopOrComma
+    }
+
+    /// Whether this cluster's style permits its punctuation to hang when it
+    /// would otherwise overflow a line end.
+    #[doc(hidden)]
+    pub fn allow_hanging_at_line_end(&self) -> bool {
+        use parley_engine::shape::HangingPunctuationClass;
+
+        let style = self.style();
+        !style.hang_end_blocked
+            && style.hanging_punctuation.allow_end()
+            && self.first_character().flags.hanging_punctuation_class()
+                == HangingPunctuationClass::StopOrComma
+    }
+
+    /// Whether this cluster's closing punctuation hangs on the last formatted line.
+    #[doc(hidden)]
+    pub fn last_hanging_at_line_end(&self) -> bool {
+        use parley_engine::shape::HangingPunctuationClass;
+
+        let style = self.style();
+        !style.hang_end_blocked
+            && style.hanging_punctuation.last()
+            && matches!(
+                self.first_character().flags.hanging_punctuation_class(),
+                HangingPunctuationClass::Closing | HangingPunctuationClass::AmbiguousQuote
+            )
+    }
+
+    /// Whether this cluster's opening punctuation hangs at the start of the
+    /// element's first formatted line.
+    #[doc(hidden)]
+    pub fn first_hanging_at_line_start(&self) -> bool {
+        use parley_engine::shape::HangingPunctuationClass;
+
+        let style = self.style();
+        !style.hang_start_blocked
+            && style.hanging_punctuation.first()
+            && matches!(
+                self.first_character().flags.hanging_punctuation_class(),
+                HangingPunctuationClass::Opening | HangingPunctuationClass::AmbiguousQuote
+            )
+    }
+
     /// The additional spacing before this grapheme on the inline axis.
     ///
     /// This includes word, letter, and justification spacing. The value is in
@@ -240,6 +449,28 @@ impl<'a, B: Brush> Cluster<'a, B> {
     /// Returns `true` if the cluster is a word boundary.
     pub fn is_word_boundary(&self) -> bool {
         self.first_character().flags.is_word_boundary()
+    }
+
+    /// Whether this atom contributes a normal text-justification opportunity.
+    #[doc(hidden)]
+    pub fn is_justification_opportunity(&self) -> bool {
+        let owns_after = if self.is_rtl() {
+            self.grapheme.is_atom_start()
+        } else {
+            self.grapheme.is_atom_end()
+        };
+        owns_after && (self.is_word_separator() || self.first_character().flags.is_cjk_typographic())
+    }
+
+    /// Whether this atom is a typographic word separator.
+    #[doc(hidden)]
+    pub fn is_word_separator(&self) -> bool {
+        crate::layout::spacing::is_word_separator(self.first_character().whitespace)
+    }
+
+    /// Returns whether UAX #14 permits a soft line break before this grapheme.
+    pub fn is_soft_wrap_opportunity_before(&self) -> bool {
+        self.first_character().flags.is_soft_wrap_opportunity()
     }
 
     /// Returns `true` if the cluster is a soft line break.

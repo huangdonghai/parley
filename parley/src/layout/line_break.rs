@@ -617,7 +617,7 @@ pub enum YieldData {
     /// rectangular regions), so you will only encounter this if you explicitly set a max height
     /// using [`BreakerState::set_line_max_height`].
     MaxHeightExceeded(MaxHeightBreakData),
-    /// Control flow was yielded because an inline box with kind [`InlineBoxKind::CustomOutOfFlow`]
+    /// Control flow was yielded because an inline box with a custom layout kind
     /// was encountered.
     ///
     /// Parley does not position these boxes itself. The caller is responsible for
@@ -652,14 +652,14 @@ pub struct MaxHeightBreakData {
 }
 
 #[derive(Clone, Debug)]
-/// Information about a "box break" (where control flow has been yielded due to an inline box
-/// with kind [`InlineBoxKind::CustomOutOfFlow`] being encountered during layout.
+/// Information about a "box break" where control flow has been yielded so the caller can resolve
+/// a custom inline box.
 pub struct BoxBreakData {
     /// The user-supplied ID for the inline box
     pub inline_box_id: u64,
     /// The index of the inline box within `Layout::inline_boxes()`
     pub inline_box_index: usize,
-    /// The current advance of the line (up to but *not* including the `CustomOutOfFlow` box)
+    /// The current advance of the line (up to but *not* including the custom box)
     pub advance: f32,
 }
 
@@ -1034,7 +1034,10 @@ impl<'a, B: Brush> BreakLines<'a, B> {
         let layout_box = &mut self.layout.data.inline_boxes[index];
         let inline_box = &layout_box.inline_box;
         match inline_box.kind {
-            InlineBoxKind::InFlow => {
+            InlineBoxKind::InFlow
+            | InlineBoxKind::CustomInFlow
+            | InlineBoxKind::CustomInFlowCentered =>
+            {
                 let placement = inline_box_placement(
                     inline_box,
                     layout_box.parent_style_index,
@@ -1135,6 +1138,144 @@ impl<'a, B: Brush> BreakLines<'a, B> {
         &mut self.state
     }
 
+    /// Ends the current line after the last item appended by the caller.
+    ///
+    /// This is used by custom in-flow items that continue in the next line after
+    /// the caller has resolved their current fragment.
+    #[doc(hidden)]
+    pub fn break_current_line(&mut self) -> Option<YieldData> {
+        let line_indent = self.resolve_indent();
+        let max_advance = self.state.line_max_advance - line_indent;
+        self.start_new_line(BreakReason::Regular, max_advance, line_indent)
+    }
+
+    /// Returns the used inline indent for the line currently being broken.
+    #[doc(hidden)]
+    pub fn current_line_indent(&self) -> f32 {
+        self.resolve_indent()
+    }
+
+    /// Resolves a yielded custom in-flow box and appends its measured fragment
+    /// to the current line.
+    #[doc(hidden)]
+    pub fn resolve_custom_inline_box(
+        &mut self,
+        index: usize,
+        width: f32,
+        height: f32,
+        baseline: f32,
+        ascent: f32,
+        descent: f32,
+        kind: InlineBoxKind,
+    ) {
+        let inline_box = &mut self.layout.data.inline_boxes[index].inline_box;
+        inline_box.kind = kind;
+        inline_box.width = width;
+        inline_box.height = height;
+        inline_box.baseline = Some(baseline);
+        let next_x = self.state.line.x + width;
+        self.state.append_inline_box_to_line(next_x, ascent, descent);
+        if kind == InlineBoxKind::CustomInFlowCentered && width > 0.0 {
+            self.state.line.hanging_followed_by_content = true;
+            if self.state.line.text_wrap_mode == TextWrapMode::Wrap {
+                self.state.mark_line_break_opportunity();
+            }
+        }
+    }
+
+    /// Sets the two-row justification data for a resolved custom composition.
+    #[doc(hidden)]
+    pub fn set_custom_inline_box_justification_profile(
+        &mut self,
+        index: usize,
+        first_width: f32,
+        first_opportunities: u32,
+        second_width: f32,
+        second_opportunities: u32,
+    ) {
+        self.layout.set_inline_box_justification_profile(
+            index,
+            first_width,
+            first_opportunities,
+            second_width,
+            second_opportunities,
+        );
+    }
+
+    /// Whether the next in-flow content item can stay on the current line
+    /// after the caller resolves this custom box to `width`.
+    #[doc(hidden)]
+    pub fn following_content_fits_after_custom_box(
+        &self,
+        inline_box_index: usize,
+        width: f32,
+        wraps: bool,
+    ) -> bool {
+        let current_id = self.layout.data.inline_boxes[inline_box_index].inline_box.id;
+        let max_advance = self.state.line_max_advance - self.resolve_indent();
+        let mut used = self.state.line.x + width;
+
+        for item in self.layout.data.items.iter().skip(self.state.item_idx + 1) {
+            match item.kind {
+                LayoutItemKind::InlineBox => {
+                    let inline_box = &self.layout.data.inline_boxes[item.index].inline_box;
+                    match inline_box.kind {
+                        InlineBoxKind::CustomInFlow if inline_box.id == current_id => continue,
+                        InlineBoxKind::OutOfFlow
+                        | InlineBoxKind::CustomOutOfFlow
+                        | InlineBoxKind::HangBoundary => continue,
+                        InlineBoxKind::InlineEdge => {
+                            used += inline_box.width;
+                            if used > max_advance && wraps {
+                                return false;
+                            }
+                        }
+                        InlineBoxKind::InFlow | InlineBoxKind::CustomInFlowCentered => {
+                            return !wraps || used + inline_box.width <= max_advance;
+                        }
+                        InlineBoxKind::CustomInFlow => {
+                            let min_width = self.layout.data.inline_boxes[item.index]
+                                .intrinsic_widths
+                                .map_or(inline_box.width, |(min, _)| min);
+                            return !wraps || used + min_width <= max_advance;
+                        }
+                    }
+                }
+                LayoutItemKind::TextRun => {
+                    let run = Run::new(self.layout, 0, 0, item.index, None);
+                    for atom in run.full_slice().atoms_start() {
+                        let whitespace = atom.characters()[0].whitespace;
+                        if whitespace == Whitespace::Newline {
+                            return false;
+                        }
+                        let style_index = atom.characters()[0].style_index;
+                        let collapse = self.layout.data.styles[style_index as usize]
+                            .white_space_collapse;
+                        let collapsible = matches!(whitespace, Whitespace::Space | Whitespace::Tab)
+                            && matches!(
+                                collapse,
+                                WhiteSpaceCollapse::Collapse | WhiteSpaceCollapse::PreserveBreaks
+                            );
+                        if collapsible {
+                            continue;
+                        }
+                        let advance = EffectiveSpacing::new(run.data.spacing, Justification::NONE)
+                            .atom_advance(&atom);
+                        if matches!(whitespace, Whitespace::Space | Whitespace::Tab) {
+                            used += advance;
+                            if used > max_advance && wraps {
+                                return false;
+                            }
+                            continue;
+                        }
+                        return !wraps || used + advance <= max_advance;
+                    }
+                }
+            }
+        }
+        false
+    }
+
     /// Set the max-advance of the previous line.
     ///
     /// This is an escape-hatch for allowing a custom width for
@@ -1230,7 +1371,9 @@ impl<'a, B: Brush> BreakLines<'a, B> {
                     // extents nor introduce a line break opportunity, so they are appended to the
                     // line and otherwise skipped.
                     let (width_contribution, height_contribution) = match inline_box.kind {
-                        InlineBoxKind::InFlow => (inline_box.width, inline_box.height),
+                        InlineBoxKind::InFlow | InlineBoxKind::CustomInFlowCentered => {
+                            (inline_box.width, inline_box.height)
+                        }
                         InlineBoxKind::HangBoundary => {
                             self.append_layout_inline_box(item.index, self.state.line.x);
                             continue;
@@ -1249,6 +1392,13 @@ impl<'a, B: Brush> BreakLines<'a, B> {
                         // If the box is a `CustomOutOfFlow` box then we yield control flow back to the caller.
                         // It is then the caller's responsibility to handle placement of the box.
                         InlineBoxKind::CustomOutOfFlow => {
+                            return Some(YieldData::InlineBoxBreak(BoxBreakData {
+                                inline_box_id: inline_box.id,
+                                inline_box_index: item.index,
+                                advance: self.state.line.x,
+                            }));
+                        }
+                        InlineBoxKind::CustomInFlow => {
                             return Some(YieldData::InlineBoxBreak(BoxBreakData {
                                 inline_box_id: inline_box.id,
                                 inline_box_index: item.index,
@@ -1393,6 +1543,7 @@ impl<'a, B: Brush> BreakLines<'a, B> {
                             prev_trigger: self.state.line.last_text_trigger,
                             next_trigger: false,
                             prev_autospace: self.state.line.last_text_autospace_class,
+                            isolate_first_autospace: false,
                             first_punctuation_hanging_cluster: hanging_start_cluster,
                             last_punctuation_hanging_cluster: None,
                         });
@@ -1481,6 +1632,7 @@ impl<'a, B: Brush> BreakLines<'a, B> {
                                     prev_trigger: self.state.line.last_text_trigger,
                                     next_trigger: false,
                                     prev_autospace: self.state.line.last_text_autospace_class,
+                                    isolate_first_autospace: false,
                                     first_punctuation_hanging_cluster: hanging_start_cluster,
                                     last_punctuation_hanging_cluster: hanging_end_cluster,
                                 };
@@ -1532,6 +1684,7 @@ impl<'a, B: Brush> BreakLines<'a, B> {
                                     prev_trigger: self.state.line.last_text_trigger,
                                     next_trigger: false,
                                     prev_autospace: self.state.line.last_text_autospace_class,
+                                    isolate_first_autospace: false,
                                     first_punctuation_hanging_cluster: None,
                                     last_punctuation_hanging_cluster: None,
                                 };
@@ -2137,7 +2290,10 @@ fn hanging_break_after<B: Brush>(
                 }
                 if !matches!(
                     inline_box.kind,
-                    InlineBoxKind::InFlow | InlineBoxKind::HangBoundary
+                    InlineBoxKind::InFlow
+                        | InlineBoxKind::CustomInFlow
+                        | InlineBoxKind::CustomInFlowCentered
+                        | InlineBoxKind::HangBoundary
                 ) {
                     continue;
                 }
@@ -2208,7 +2364,10 @@ fn inline_end_on_line<B: Brush>(
                 }
                 if !matches!(
                     layout_box.inline_box.kind,
-                    InlineBoxKind::InFlow | InlineBoxKind::HangBoundary
+                    InlineBoxKind::InFlow
+                        | InlineBoxKind::CustomInFlow
+                        | InlineBoxKind::CustomInFlowCentered
+                        | InlineBoxKind::HangBoundary
                 ) {
                     continue;
                 }
@@ -2557,6 +2716,7 @@ fn hanging_advance_after_trim<B: Brush>(
         prev_trigger: false,
         next_trigger: false,
         prev_autospace: None,
+        isolate_first_autospace: false,
         first_punctuation_hanging_cluster: None,
         last_punctuation_hanging_cluster: None,
     };
@@ -2616,7 +2776,10 @@ fn hanging_whitespace<B: Brush>(
                 let item = &layout.data.inline_boxes[line_item.index].inline_box;
 
                 // Inline boxes don't hang.
-                if item.kind == InlineBoxKind::InFlow {
+                if matches!(
+                    item.kind,
+                    InlineBoxKind::InFlow | InlineBoxKind::CustomInFlowCentered
+                ) {
                     break;
                 }
             }

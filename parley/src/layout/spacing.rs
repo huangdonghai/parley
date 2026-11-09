@@ -248,6 +248,8 @@ pub(crate) struct TrimLineContext {
     pub(crate) next_trigger: bool,
     /// The `text-autospace` class of the preceding text on this line.
     pub(crate) prev_autospace: Option<AutoSpaceClass>,
+    /// Whether the first atom of a sliced note row must ignore atoms before its range.
+    pub(crate) isolate_first_autospace: bool,
     /// Shaped-cluster index of the hanging opening punctuation, if any.
     pub(crate) first_punctuation_hanging_cluster: Option<u32>,
     /// Shaped-cluster index of the hanging punctuation at the line end, if any.
@@ -267,6 +269,7 @@ impl TrimLineContext {
         prev_trigger: false,
         next_trigger: false,
         prev_autospace: None,
+        isolate_first_autospace: false,
         first_punctuation_hanging_cluster: None,
         last_punctuation_hanging_cluster: None,
     };
@@ -324,6 +327,55 @@ impl EffectiveSpacing {
     #[inline(always)]
     pub(crate) const fn with_trim_line(mut self, trim_line: TrimLineContext) -> Self {
         self.trim_line = trim_line;
+        self
+    }
+
+    /// Reinterprets the line edges for a range of pre-shaped note content.
+    #[inline(always)]
+    pub(crate) const fn with_note_line_range(
+        mut self,
+        first_cluster: u32,
+        last_cluster: u32,
+        first_line: bool,
+        line_start: bool,
+        line_end: bool,
+    ) -> Self {
+        if line_start {
+            self.trim_line.first_cluster = Some(first_cluster);
+            self.trim_line.first_line = first_line;
+            self.trim_line.prev_trigger = false;
+            self.trim_line.prev_autospace = None;
+            self.trim_line.isolate_first_autospace = true;
+            self.trim_line.first_punctuation_hanging_cluster = None;
+        } else {
+            self.trim_line.first_cluster = None;
+            self.trim_line.first_line = false;
+            self.trim_line.isolate_first_autospace = false;
+            self.trim_line.first_punctuation_hanging_cluster = None;
+        }
+        if line_end {
+            self.trim_line.last_cluster = Some(last_cluster);
+            self.trim_line.end_trimmed = false;
+            self.trim_line.next_trigger = false;
+            self.trim_line.last_punctuation_hanging_cluster = None;
+        } else {
+            self.trim_line.last_cluster = None;
+            self.trim_line.last_punctuation_hanging_cluster = None;
+        }
+        self.trim_line.end_unknown = false;
+        self
+    }
+
+    #[inline(always)]
+    pub(crate) const fn with_note_line_hanging(
+        mut self,
+        first_punctuation: Option<u32>,
+        last_punctuation: Option<u32>,
+        hanging_for_paint: bool,
+    ) -> Self {
+        self.trim_line.first_punctuation_hanging_cluster = first_punctuation;
+        self.trim_line.last_punctuation_hanging_cluster = last_punctuation;
+        self.trim_line.hanging_for_paint = hanging_for_paint;
         self
     }
 
@@ -396,13 +448,21 @@ impl EffectiveSpacing {
         }
 
         if self.spacing.text_autospace == TextAutospace::Normal {
-            let previous = atom
-                .cursor_before()
-                .prev()
-                .map(|previous| {
-                    effective_auto_space_class(&previous.characters()[0], self.spacing.vertical)
-                })
-                .or(self.trim_line.prev_autospace);
+            let previous = if self.trim_line.isolate_first_autospace
+                && self.trim_line.first_cluster == Some(range.start)
+            {
+                self.trim_line.prev_autospace
+            } else {
+                atom.cursor_before()
+                    .prev()
+                    .map(|previous| {
+                        effective_auto_space_class(
+                            &previous.characters()[0],
+                            self.spacing.vertical,
+                        )
+                    })
+                    .or(self.trim_line.prev_autospace)
+            };
             let Some(previous) = previous else {
                 return gaps;
             };

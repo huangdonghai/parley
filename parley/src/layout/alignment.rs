@@ -76,10 +76,43 @@ pub(crate) fn align<B: Brush>(
     layout.data.alignment = Some(alignment);
 
     let is_rtl = layout.data.base_level.is_rtl();
+    // Alignment can be requested more than once with different values. Custom
+    // compositions are expanded below, so restore their natural widths before
+    // measuring each pass.
+    for layout_box in &mut layout.data.inline_boxes {
+        if let Some((_, _, _, _, natural_box_width)) = layout_box.justification_profile {
+            layout_box.inline_box.width = natural_box_width;
+        }
+    }
     for line in &mut layout.data.lines {
         line.justification.amount_per_opportunity = 0.;
         line.metrics.offset = 0.;
     }
+    let custom_justification_by_line: Vec<Vec<(usize, f32, u32, f32, u32)>> = layout
+        .data
+        .lines
+        .iter()
+        .map(|line| {
+            layout.data.line_items[line.item_range.clone()]
+                .iter()
+                .filter_map(|item| {
+                    if item.kind != super::LayoutItemKind::InlineBox {
+                        return None;
+                    }
+                    let layout_box = &layout.data.inline_boxes[item.index];
+                    let (first_width, first_count, second_width, second_count, _) =
+                        layout_box.justification_profile?;
+                    Some((
+                        item.index,
+                        first_width,
+                        first_count,
+                        second_width,
+                        second_count,
+                    ))
+                })
+                .collect()
+        })
+        .collect();
     // The breaker's running x does not include every contextual spacing
     // adjustment (notably interior text-spacing-trim), while the painted runs
     // do. Reconstruct the unpainted line advance from those runs so
@@ -104,7 +137,10 @@ pub(crate) fn align<B: Brush>(
                         PositionedLayoutItem::InlineBox(inline_box)
                             if matches!(
                                 inline_box.kind,
-                                InlineBoxKind::InFlow | InlineBoxKind::InlineEdge
+                                InlineBoxKind::InFlow
+                                    | InlineBoxKind::CustomInFlow
+                                    | InlineBoxKind::CustomInFlowCentered
+                                    | InlineBoxKind::InlineEdge
                             ) =>
                         {
                             advance += inline_box.width;
@@ -118,6 +154,7 @@ pub(crate) fn align<B: Brush>(
     };
 
     // Apply alignment to line items
+    let mut custom_width_expansions = Vec::new();
     for (index, line) in layout.data.lines.iter_mut().enumerate() {
         if let Some(advance) = visual_advances[index] {
             line.metrics.advance = advance;
@@ -176,19 +213,77 @@ pub(crate) fn align<B: Brush>(
                     continue;
                 }
 
-                // Justified alignment doesn't apply if there are no whitespace gaps to adjust. In
-                // that case, start-align, i.e., left-align for LTR text and right-align for RTL
-                // text.
-                if line.num_justification_opportunities == 0 {
+                let custom_profiles = &custom_justification_by_line[index];
+                if custom_profiles.is_empty() {
+                    if line.num_justification_opportunities == 0 {
+                        if is_rtl {
+                            line.metrics.offset += free_space;
+                        }
+                    } else {
+                        line.justification.amount_per_opportunity =
+                            free_space / line.num_justification_opportunities as f32;
+                    }
+                    continue;
+                }
+                let custom_opportunities: u32 = custom_profiles
+                    .iter()
+                    .map(|(_, _, first, _, second)| (*first).max(*second))
+                    .sum();
+                let total_opportunities = line
+                    .num_justification_opportunities
+                    .saturating_add(custom_opportunities);
+                // Justified alignment doesn't apply if there are no text or
+                // composition gaps to adjust.
+                if total_opportunities == 0 {
                     if is_rtl {
                         line.metrics.offset += free_space;
                     }
                     continue;
                 }
 
-                line.justification.amount_per_opportunity =
-                    free_space / line.num_justification_opportunities as f32;
+                let total_growth = |amount: f32| {
+                    let text_growth = line.num_justification_opportunities as f32 * amount;
+                    custom_profiles.iter().fold(text_growth, |growth, profile| {
+                        let (_, first_width, first_count, second_width, second_count) = *profile;
+                        let natural_width = first_width.max(second_width);
+                        let justified_width = (first_width + first_count as f32 * amount)
+                            .max(second_width + second_count as f32 * amount);
+                        growth + (justified_width - natural_width)
+                    })
+                };
+                let max_natural_width = custom_profiles
+                    .iter()
+                    .map(|(_, first_width, _, second_width, _)| {
+                        (*first_width).max(*second_width)
+                    })
+                    .sum::<f32>();
+                let mut low = 0.0;
+                let mut high = free_space + max_natural_width + 1.0;
+                for _ in 0..32 {
+                    let middle = (low + high) * 0.5;
+                    if total_growth(middle) < free_space {
+                        low = middle;
+                    } else {
+                        high = middle;
+                    }
+                }
+                let amount = high;
+                line.justification.amount_per_opportunity = amount;
+                for (box_index, first_width, first_count, second_width, second_count) in
+                    custom_profiles
+                {
+                    let natural_width = first_width.max(*second_width);
+                    let justified_width = (*first_width + *first_count as f32 * amount)
+                        .max(*second_width + *second_count as f32 * amount);
+                    custom_width_expansions.push((*box_index, justified_width - natural_width));
+                }
             }
+        }
+    }
+
+    for (index, expansion) in custom_width_expansions {
+        if let Some(layout_box) = layout.data.inline_boxes.get_mut(index) {
+            layout_box.inline_box.width += expansion;
         }
     }
 }

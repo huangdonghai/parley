@@ -71,6 +71,8 @@ impl<'b, B: Brush> RangedBuilder<'b, B> {
     pub fn push_inline_box(&mut self, inline_box: InlineBox) {
         self.lcx.inline_boxes.push(LayoutInlineBox {
             inline_box,
+            intrinsic_widths: None,
+            justification_profile: None,
             parent_style_index: 0,
             baseline_offset: 0.,
         });
@@ -175,6 +177,8 @@ impl<'b, B: Brush> StyleRunBuilder<'b, B> {
     pub fn push_inline_box(&mut self, inline_box: InlineBox) {
         self.lcx.inline_boxes.push(LayoutInlineBox {
             inline_box,
+            intrinsic_widths: None,
+            justification_profile: None,
             parent_style_index: 0,
             baseline_offset: 0.,
         });
@@ -287,7 +291,11 @@ impl<'b, B: Brush> TreeBuilder<'b, B> {
     pub fn push_inline_box(&mut self, mut inline_box: InlineBox) {
         if matches!(
             inline_box.kind,
-            InlineBoxKind::InFlow | InlineBoxKind::HangBoundary | InlineBoxKind::InlineEdge
+            InlineBoxKind::InFlow
+                | InlineBoxKind::CustomInFlow
+                | InlineBoxKind::CustomInFlowCentered
+                | InlineBoxKind::HangBoundary
+                | InlineBoxKind::InlineEdge
         ) {
             self.lcx.tree_style_builder.flush_pending_whitespace();
             self.lcx.tree_style_builder.set_last_item_is_inline_box();
@@ -298,6 +306,8 @@ impl<'b, B: Brush> TreeBuilder<'b, B> {
         let parent_style_index = self.lcx.tree_style_builder.resolve_current_style_id();
         self.lcx.inline_boxes.push(LayoutInlineBox {
             inline_box,
+            intrinsic_widths: None,
+            justification_profile: None,
             parent_style_index,
             baseline_offset: 0.,
         });

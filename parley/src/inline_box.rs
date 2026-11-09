@@ -30,6 +30,12 @@ pub struct InlineBox {
 #[derive(PartialEq, Debug, Clone)]
 pub(crate) struct LayoutInlineBox {
     pub(crate) inline_box: InlineBox,
+    /// Optional min/max width contribution for a custom composition whose intrinsic
+    /// width differs from its measured inline-box width.
+    pub(crate) intrinsic_widths: Option<(f32, f32)>,
+    /// Natural subline widths and their stretchable-gap counts for a custom
+    /// composition that participates in parent-line justification.
+    pub(crate) justification_profile: Option<(f32, u32, f32, u32, f32)>,
     /// Style index of the span containing the box, against which the box's `vertical_align`
     /// is resolved. The box itself has no style of its own.
     pub(crate) parent_style_index: u16,
@@ -59,6 +65,13 @@ pub enum InlineBoxKind {
     ///
     /// They can be used to implement advanced layout modes such as CSS's `float`
     CustomOutOfFlow,
+    /// `CustomInFlow` boxes take up space in the line, but their advance and block extent are resolved
+    /// by the caller when Parley reaches them. They can represent breakable inline compositions whose
+    /// size depends on the remaining room in the current line.
+    CustomInFlow,
+    /// An in-flow composition resolved from a custom in-flow placeholder.
+    /// Its block-axis box is centred in the completed line box.
+    CustomInFlowCentered,
     /// An empty in-flow inline box whose inline-axis border or padding is
     /// non-zero.
     ///

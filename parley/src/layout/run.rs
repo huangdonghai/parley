@@ -147,6 +147,7 @@ impl<'a, B: Brush> Run<'a, B> {
                     prev_trigger,
                     next_trigger,
                     prev_autospace,
+                    isolate_first_autospace: false,
                     first_punctuation_hanging_cluster: line.first_hanging_cluster,
                     last_punctuation_hanging_cluster: line.end_hanging.then_some(line.last_hanging_cluster.unwrap_or_default()),
                 },

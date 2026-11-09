@@ -1052,6 +1052,10 @@ impl<'a, B: Brush> BreakLines<'a, B> {
                 self.state.append_inline_box_to_line(next_x, 0.0, 0.0);
                 self.state.line.hanging_followed_by_content = true;
             }
+            InlineBoxKind::Anchor => {
+                self.state.item_idx += 1;
+                self.state.line.items.end += 1;
+            }
             InlineBoxKind::InlineEdge => {
                 self.state
                     .append_inline_box_to_line(next_x, f32::NEG_INFINITY, f32::NEG_INFINITY);
@@ -1223,7 +1227,8 @@ impl<'a, B: Brush> BreakLines<'a, B> {
                         InlineBoxKind::CustomInFlow if inline_box.id == current_id => continue,
                         InlineBoxKind::OutOfFlow
                         | InlineBoxKind::CustomOutOfFlow
-                        | InlineBoxKind::HangBoundary => continue,
+                        | InlineBoxKind::HangBoundary
+                        | InlineBoxKind::Anchor => continue,
                         InlineBoxKind::InlineEdge => {
                             used += inline_box.width;
                             if used > max_advance && wraps {
@@ -1375,6 +1380,10 @@ impl<'a, B: Brush> BreakLines<'a, B> {
                             (inline_box.width, inline_box.height)
                         }
                         InlineBoxKind::HangBoundary => {
+                            self.append_layout_inline_box(item.index, self.state.line.x);
+                            continue;
+                        }
+                        InlineBoxKind::Anchor => {
                             self.append_layout_inline_box(item.index, self.state.line.x);
                             continue;
                         }
@@ -2665,6 +2674,7 @@ fn commit_line<B: Brush>(
                 }),
             ..Justification::NONE
         },
+        suppress_justify: false,
         metrics: LineMetrics {
             indent: line_indent,
             advance,

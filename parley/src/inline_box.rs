@@ -82,4 +82,10 @@ pub enum InlineBoxKind {
     /// A zero-height inline edge that contributes only its width along the
     /// inline axis, such as the margin of a non-replaced inline element.
     InlineEdge,
+    /// A zero-size declaration point that takes no room in the line and does
+    /// not interrupt the text around it.
+    ///
+    /// Callers use it to recover the inline coordinate of a node that is laid
+    /// out elsewhere, such as an interline note.
+    Anchor,
 }

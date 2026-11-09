@@ -187,7 +187,9 @@ pub(crate) fn align<B: Brush>(
         }
 
         let is_last_line = matches!(line.break_reason, BreakReason::None | BreakReason::Explicit);
-        let line_alignment = if !is_last_line {
+        let line_alignment = if line.suppress_justify {
+            Alignment::Start
+        } else if !is_last_line {
             alignment
         } else if let Some(last_line_alignment) = options.last_line_alignment {
             last_line_alignment

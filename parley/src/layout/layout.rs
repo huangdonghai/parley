@@ -202,6 +202,41 @@ impl<B: Brush> Layout<B> {
         self.data.height
     }
 
+    /// Shift the block-axis position of each line by the matching offset.
+    ///
+    /// Horizontal writing modes use the vertical axis and vertical writing modes
+    /// use the horizontal axis as Parley's block axis. A caller that inserts
+    /// content between ordinary lines can adjust those positions after breaking
+    /// so painting, hit testing and line extents all see the same geometry.
+    #[doc(hidden)]
+    pub fn shift_line_block_offsets(&mut self, offsets: &[f32]) {
+        for (line, offset) in self.data.lines.iter_mut().zip(offsets.iter().copied()) {
+            line.metrics.block_min_coord += offset;
+            line.metrics.block_max_coord += offset;
+            line.metrics.baseline += offset;
+            line.metrics.content_block_min_coord += offset;
+            line.metrics.content_block_max_coord += offset;
+        }
+    }
+
+    /// Override the layout's block-axis size, in the same units as
+    /// [`Self::height`].
+    #[doc(hidden)]
+    pub fn set_block_size(&mut self, height: f32) {
+        self.data.height = height;
+    }
+
+    /// Prevent `text-align: justify` from stretching one line.
+    ///
+    /// A line that ends because the caller moved the flow to a later slot did
+    /// not run out of room naturally, so it must keep its natural width.
+    #[doc(hidden)]
+    pub fn suppress_line_justification(&mut self, index: usize) {
+        if let Some(line) = self.data.lines.get_mut(index) {
+            line.suppress_justify = true;
+        }
+    }
+
     /// Returns the number of lines in the layout.
     pub fn len(&self) -> usize {
         self.data.lines.len()

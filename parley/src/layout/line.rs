@@ -302,6 +302,8 @@ pub enum PositionedLayoutItem<'a, B: Brush> {
 pub struct PositionedInlineBox {
     /// Index of this box in [`Layout::inline_boxes`](crate::Layout::inline_boxes).
     pub index: usize,
+    /// Item index within the line that produced this box.
+    pub item_index: usize,
     pub x: f32,
     pub y: f32,
     pub width: f32,
@@ -535,6 +537,7 @@ impl<'a, B: Brush> Iterator for GlyphRunIter<'a, B> {
                         self.item_index += 1;
                         continue;
                     }
+                    let item_index = self.item_index;
                     let x = self.offset
                         + self.line.data.metrics.inline_min_coord
                         + self.line.data.metrics.offset;
@@ -555,6 +558,7 @@ impl<'a, B: Brush> Iterator for GlyphRunIter<'a, B> {
                     }
                     return Some(PositionedLayoutItem::InlineBox(PositionedInlineBox {
                         index: box_index,
+                        item_index,
                         x,
                         y,
                         width: inline_box.width,

@@ -587,3 +587,23 @@ fn any_font(query: &mut Query<'_>) -> Option<QueryFont> {
 
     found
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn width_features_override_only_their_axis() {
+        let enabled = |tag| FontFeature::new(tag, 1);
+        let vhal = [enabled(Tag::new(b"vhal"))];
+        let halt = [enabled(Tag::new(b"halt"))];
+        assert!(!overrides_spacing_trim(&vhal, false));
+        assert!(overrides_spacing_trim(&vhal, true));
+        assert!(overrides_spacing_trim(&halt, false));
+        assert!(!overrides_spacing_trim(&halt, true));
+        assert!(!overrides_spacing_trim(
+            &[FontFeature::new(Tag::new(b"vhal"), 0)],
+            true
+        ));
+    }
+}

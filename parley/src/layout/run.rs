@@ -406,6 +406,8 @@ pub(crate) struct Glyphs<'a> {
     glyphs: ShapedClusterGlyphs<'a>,
     /// The gaps around the current atom; only meaningful with `spacing`.
     gaps: Gaps,
+    /// Extra inline offset that places the current atom's painted glyphs.
+    visual_shift: f32,
     /// The index within the current atom of the next glyph to yield. The first one gets
     /// `gaps.before`.
     atom_glyph: usize,
@@ -441,6 +443,7 @@ impl<'a> Glyphs<'a> {
             },
             glyphs: ShapedClusterGlyphs::empty(),
             gaps: Gaps::ZERO,
+            visual_shift: 0.,
             atom_glyph: 0,
             atom_glyph_count: 0,
         }
@@ -463,6 +466,13 @@ impl Iterator for Glyphs<'_> {
                     if self.atom_glyph == 0 && !vertical {
                         glyph.x += self.gaps.before;
                         glyph.advance += self.gaps.before;
+                    }
+                    if self.visual_shift != 0. {
+                        if !vertical || glyph.vertical_advance == 0. {
+                            glyph.x += self.visual_shift;
+                        } else {
+                            glyph.vertical_origin += self.visual_shift;
+                        }
                     }
                     self.atom_glyph += 1;
                     if self.atom_glyph == self.atom_glyph_count && !vertical {
@@ -493,6 +503,7 @@ impl Iterator for Glyphs<'_> {
             self.shaped_clusters = atom.shaped_clusters_range();
             let context_atom = self.context.atoms_from(self.shaped_clusters.start).next()?;
             self.gaps = spacing.gaps(&context_atom);
+            self.visual_shift = spacing.trim_glyph_shift(&context_atom);
             self.atom_glyph = 0;
             self.atom_glyph_count = atom
                 .shaped_clusters()

@@ -53,6 +53,9 @@ impl ShapedClusterFlags {
     /// [`Whitespace`] class of the cluster's first character (3 bits).
     const WHITESPACE_SHIFT: u16 = 12;
     const WHITESPACE_MASK: u16 = 0b111 << Self::WHITESPACE_SHIFT;
+    /// Whether [`ShapedCluster::trim_leading_blank`] and
+    /// [`ShapedCluster::trim_trailing_blank`] hold measured glyph metrics.
+    const HAS_TRIM_BLANKS: u16 = 1 << 15;
 
     #[inline(always)]
     pub(crate) const fn new(glyph_len: u8) -> Self {
@@ -95,6 +98,12 @@ impl ShapedClusterFlags {
     }
 
     #[inline(always)]
+    pub(crate) const fn with_trim_blanks(mut self, set: bool) -> Self {
+        self.0 = self.0 & !Self::HAS_TRIM_BLANKS | if set { Self::HAS_TRIM_BLANKS } else { 0 };
+        self
+    }
+
+    #[inline(always)]
     const fn is_soft_wrap_opportunity_before(self) -> bool {
         self.0 & Self::SOFT_WRAP_BEFORE != 0
     }
@@ -131,6 +140,11 @@ impl ShapedClusterFlags {
     #[inline(always)]
     const fn is_safe_to_break_before(self) -> bool {
         self.0 & Self::SAFE_TO_BREAK_BEFORE != 0
+    }
+
+    #[inline(always)]
+    const fn has_trim_blanks(self) -> bool {
+        self.0 & Self::HAS_TRIM_BLANKS != 0
     }
 }
 
@@ -191,6 +205,21 @@ pub struct ShapedCluster {
     /// `ShapedText::set_vertical_advances` for upright clusters. Painting still needs the glyph's
     /// horizontal extent for the block axis.
     pub horizontal_advance: f32,
+
+    /// The glyph's leading whitespace along the active inline axis, in layout
+    /// units, measured from its ink bounds.
+    ///
+    /// This is horizontal at shaping time. For upright clusters in a vertical
+    /// layout, [`ShapedText::set_vertical_advances`](crate::ShapedText::set_vertical_advances)
+    /// replaces it with the top blank measured against the vertical origin and
+    /// advance.
+    pub(crate) trim_leading_blank: f32,
+
+    /// The glyph's trailing whitespace along the active inline axis, in layout
+    /// units, measured from its ink bounds.
+    ///
+    /// See [`Self::trim_leading_blank`].
+    pub(crate) trim_trailing_blank: f32,
 }
 
 impl ShapedCluster {
@@ -271,6 +300,19 @@ impl ShapedCluster {
         }
         graphemes
     }
+
+    /// The glyph ink's leading and trailing blanks along the active inline
+    /// axis, in layout units.
+    ///
+    /// Returns `None` when the font did not provide usable glyph bounds, or
+    /// when the cluster is not spacing-trim punctuation.
+    #[doc(hidden)]
+    #[inline(always)]
+    pub fn trim_blanks(self) -> Option<(f32, f32)> {
+        self.flags
+            .has_trim_blanks()
+            .then_some((self.trim_leading_blank, self.trim_trailing_blank))
+    }
 }
 
 /// Properties of a [`Character`].
@@ -347,6 +389,9 @@ impl CharacterFlags {
     const AUTO_SPACE_UPRIGHT: u16 = 1 << 10;
     const HANGING_PUNCTUATION_SHIFT: u16 = 11;
     const HANGING_PUNCTUATION_MASK: u16 = 0b111 << Self::HANGING_PUNCTUATION_SHIFT;
+    /// Whether this punctuation belongs to a paired family (`Ps`/`Pe` or
+    /// `Pi`/`Pf`), whose trimmed glyph should lean toward its content.
+    const SPACING_TRIM_PAIRED: u16 = 1 << 14;
 
     #[inline(always)]
     pub fn new(source_char: char, is_word_boundary: bool, is_soft_wrap_opportunity: bool) -> Self {
@@ -357,6 +402,7 @@ impl CharacterFlags {
             reason = "`len_utf8` is between 1 and 4 inclusive"
         )]
         let len_utf8 = source_char.len_utf8() as u8;
+        let (spacing_trim_class, spacing_trim_paired) = spacing_trim_class(source_char);
         Self(
             u16::from(len_utf8 - 1)
                 | if is_emoji { u16::from(Self::EMOJI) } else { 0 }
@@ -375,7 +421,12 @@ impl CharacterFlags {
                 } else {
                     0
                 }
-                | (u16::from(spacing_trim_class(source_char) as u8) << Self::SPACING_TRIM_SHIFT),
+                | (u16::from(spacing_trim_class as u8) << Self::SPACING_TRIM_SHIFT)
+                | if spacing_trim_paired {
+                    Self::SPACING_TRIM_PAIRED
+                } else {
+                    0
+                },
         )
     }
 
@@ -417,6 +468,17 @@ impl CharacterFlags {
             3 => SpacingTrimClass::MiddleDot,
             _ => SpacingTrimClass::Other,
         }
+    }
+
+    /// Whether this character is paired punctuation for the purposes of
+    /// `text-spacing-trim` glyph placement.
+    ///
+    /// Unicode `General_Category` `Ps`/`Pe` (brackets and braces) and `Pi`/`Pf`
+    /// (initial/final quotation marks) lean toward the content they enclose.
+    /// Other punctuation keeps its ink centred in the trimmed half-em box.
+    #[inline(always)]
+    pub fn is_spacing_trim_paired(self) -> bool {
+        self.0 & Self::SPACING_TRIM_PAIRED != 0
     }
 
     /// The `text-autospace` class for this character.
@@ -557,31 +619,43 @@ fn is_cjk_typographic_char(ch: char) -> bool {
 /// The default classification of the ambiguous fullwidth colon/dot characters is
 /// closing punctuation; callers with language information can refine the
 /// ambiguous cases later. The common punctuation paths avoid a Unicode lookup.
-fn spacing_trim_class(ch: char) -> SpacingTrimClass {
+fn spacing_trim_class(ch: char) -> (SpacingTrimClass, bool) {
     match ch {
-        '\u{2018}' | '\u{201C}' => SpacingTrimClass::Opening,
-        '\u{2019}' | '\u{201D}' => SpacingTrimClass::Closing,
-        '\u{00B7}' | '\u{2027}' | '\u{30FB}' => SpacingTrimClass::MiddleDot,
+        '\u{00B7}' | '\u{2027}' | '\u{30FB}' => (SpacingTrimClass::MiddleDot, false),
         // Fullwidth colon/semicolon and dot punctuation. The default (language-
         // independent) classification follows the informative table for
         // Simplified Chinese: closing punctuation.
         '\u{3001}' | '\u{3002}' | '\u{FF0C}' | '\u{FF0E}' | '\u{FF1A}' | '\u{FF1B}' => {
-            SpacingTrimClass::Closing
+            (SpacingTrimClass::Closing, false)
         }
         // Narrow (ASCII) brackets are never trim targets (their advances are
         // well below fullwidth, so the layout guard skips them), but they do
         // count as Ps/Pe neighbors for adjacent-pair collapsing.
-        '(' | '[' | '{' => SpacingTrimClass::Opening,
-        ')' | ']' | '}' => SpacingTrimClass::Closing,
+        '(' | '[' | '{' => (SpacingTrimClass::Opening, true),
+        ')' | ']' | '}' => (SpacingTrimClass::Closing, true),
         _ => {
-            let fullwidth = matches!(ch as u32, 0x3000..=0x303F | 0xFF00..=0xFFEF);
-            if !fullwidth {
-                return SpacingTrimClass::Other;
+            // Query General_Category only in blocks that can contain the
+            // paired punctuation this property controls. Ordinary letters,
+            // ideographs and marks stay on the constant-time path above.
+            let punctuation_block = matches!(
+                ch as u32,
+                0x2000..=0x206F // General Punctuation
+                    | 0x3000..=0x303F // CJK Symbols and Punctuation
+                    | 0xFE10..=0xFE1F // Vertical Forms
+                    | 0xFE30..=0xFE4F // CJK Compatibility Forms
+                    | 0xFF00..=0xFFEF // Halfwidth and Fullwidth Forms
+            );
+            if !punctuation_block {
+                return (SpacingTrimClass::Other, false);
             }
             match Properties::get(ch).general_category() {
-                GeneralCategory::OpenPunctuation => SpacingTrimClass::Opening,
-                GeneralCategory::ClosePunctuation => SpacingTrimClass::Closing,
-                _ => SpacingTrimClass::Other,
+                GeneralCategory::OpenPunctuation | GeneralCategory::InitialPunctuation => {
+                    (SpacingTrimClass::Opening, true)
+                }
+                GeneralCategory::ClosePunctuation | GeneralCategory::FinalPunctuation => {
+                    (SpacingTrimClass::Closing, true)
+                }
+                _ => (SpacingTrimClass::Other, false),
             }
         }
     }
@@ -690,6 +764,20 @@ mod tests {
                 grapheme_start: true,
             };
             assert_eq!(character.text_byte_range(), 3..3 + len, "{ch:?}");
+        }
+    }
+
+    #[test]
+    fn trim_paired_categories() {
+        for ch in [
+            '（', '）', '【', '】', '「', '」', '《', '》', '｛', '｝', '“', '”', '‘', '’',
+        ] {
+            let flags = CharacterFlags::new(ch, false, false);
+            assert!(flags.is_spacing_trim_paired(), "{ch:?}");
+        }
+        for ch in ['、', '。', '，', '：', '・', 'a'] {
+            let flags = CharacterFlags::new(ch, false, false);
+            assert!(!flags.is_spacing_trim_paired(), "{ch:?}");
         }
     }
 

@@ -487,6 +487,76 @@ impl EffectiveSpacing {
         atom.advance() + gaps.total()
     }
 
+    /// The additional glyph offset that places trimmed punctuation's ink.
+    ///
+    /// The advance itself is always trimmed to half an em. This offset only
+    /// moves the painted glyph inside that half-em cell: paired punctuation
+    /// (brackets, braces and quotation marks) leans toward the content it
+    /// encloses, while all other punctuation is centred.
+    pub(crate) fn trim_glyph_shift(self, atom: &Atom<'_>) -> f32 {
+        let class = atom.characters()[0].flags.spacing_trim_class();
+        let advance = atom.advance();
+        if !self.trims_atom(class, atom, advance) {
+            return 0.;
+        }
+        let Some((leading, trailing)) = atom
+            .shaped_clusters()
+            .first()
+            .and_then(|cluster| cluster.trim_blanks())
+        else {
+            return 0.;
+        };
+
+        let half = self.spacing.font_size / 2.;
+        let trim = (advance - half).max(0.);
+        let ink_width = (advance - leading - trailing).max(0.);
+        let target = if atom.characters()[0].flags.is_spacing_trim_paired() {
+            match class {
+                SpacingTrimClass::Opening => trailing - trim,
+                SpacingTrimClass::Closing => -leading,
+                SpacingTrimClass::MiddleDot | SpacingTrimClass::Other => {
+                    half / 2. - (leading + ink_width / 2.)
+                }
+            }
+        } else {
+            half / 2. - (leading + ink_width / 2.)
+        };
+
+        // Keep the ink inside the half-em cell when it fits. A glyph wider
+        // than half an em cannot satisfy both edges; centre the available
+        // range instead of cutting one side off.
+        let min = -leading;
+        let max = half - leading - ink_width;
+        let target = if min <= max {
+            target.clamp(min, max)
+        } else {
+            (min + max) / 2.
+        };
+        let trim_shift = match class {
+            SpacingTrimClass::Opening => -trim,
+            SpacingTrimClass::Closing => 0.,
+            SpacingTrimClass::MiddleDot => -trim / 2.,
+            SpacingTrimClass::Other => 0.,
+        };
+        target - trim_shift
+    }
+
+    /// Whether `text-spacing-trim` makes `atom` half-width at this position.
+    #[inline(always)]
+    fn trims_atom(self, class: SpacingTrimClass, atom: &Atom<'_>, advance: f32) -> bool {
+        let trim = self.spacing.text_spacing_trim();
+        if class == SpacingTrimClass::Other || !is_fullwidth(advance, self.spacing.font_size) {
+            return false;
+        }
+        if trim.trims_all() {
+            true
+        } else if matches!(trim, TextSpacingTrim::Auto) {
+            false
+        } else {
+            self.trim_decision(class, atom)
+        }
+    }
+
     /// Apply the punctuation half-width adjustments of `text-spacing-trim` to `gaps`.
     fn apply_text_spacing_trim(self, atom: &Atom<'_>, gaps: &mut Gaps) {
         let trim = self.spacing.text_spacing_trim();
@@ -495,15 +565,10 @@ impl EffectiveSpacing {
             if !is_fullwidth(advance, self.spacing.font_size) {
                 return;
             }
-            match atom.characters()[0].flags.spacing_trim_class() {
-                SpacingTrimClass::Opening => gaps.before -= advance / 2.,
-                SpacingTrimClass::Closing => gaps.after -= advance / 2.,
-                SpacingTrimClass::MiddleDot => {
-                    gaps.before -= advance / 4.;
-                    gaps.after -= advance / 4.;
-                }
-                SpacingTrimClass::Other => {}
-            }
+            let class = atom.characters()[0].flags.spacing_trim_class();
+            let (before, after) = trim_amounts(class, advance, self.spacing.font_size);
+            gaps.before -= before;
+            gaps.after -= after;
         } else if !matches!(trim, TextSpacingTrim::Auto) {
             let advance = atom.advance();
             let class = atom.characters()[0].flags.spacing_trim_class();
@@ -513,23 +578,12 @@ impl EffectiveSpacing {
                 let is_last = self.trim_line.last_cluster == Some(range.end);
                 let trimmed = self.trim_decision(class, atom);
                 if trimmed && is_fullwidth(advance, self.spacing.font_size) {
-                    match class {
-                        // The blank half of opening punctuation is the one
-                        // before the glyph — left in horizontal text, top in
-                        // vertical — so the trim goes on the start side in
-                        // both writing modes. Kerning the start pulls the
-                        // glyph's ink and everything after it back by half an
-                        // em, which is the same geometry as swapping in the
-                        // font's half-width form (`halt`/`vhal`) and shifting
-                        // the glyph, without needing the font to have one.
-                        SpacingTrimClass::Opening => gaps.before -= advance / 2.,
-                        SpacingTrimClass::Closing => gaps.after -= advance / 2.,
-                        SpacingTrimClass::MiddleDot => {
-                            // Middle dots are only trimmed by `trim-all`, never
-                            // by position; `trimmed` is false for them here.
-                        }
-                        SpacingTrimClass::Other => {}
-                    }
+                    // The blank half of opening punctuation is the one before
+                    // the glyph — left in horizontal text, top in vertical —
+                    // so the trim goes on the start side in both writing modes.
+                    let (before, after) = trim_amounts(class, advance, self.spacing.font_size);
+                    gaps.before -= before;
+                    gaps.after -= after;
                 } else if !trimmed
                     && !is_first
                     && !is_last
@@ -681,6 +735,18 @@ fn is_fullwidth(advance: f32, font_size: f32) -> bool {
 #[inline(always)]
 fn is_halfwidth(advance: f32, font_size: f32) -> bool {
     (advance - font_size / 2.).abs() <= font_size * 0.02
+}
+
+/// The advances `text-spacing-trim` removes from each side of punctuation.
+#[inline(always)]
+fn trim_amounts(class: SpacingTrimClass, advance: f32, font_size: f32) -> (f32, f32) {
+    let trim = (advance - font_size / 2.).max(0.);
+    match class {
+        SpacingTrimClass::Opening => (trim, 0.),
+        SpacingTrimClass::Closing => (0., trim),
+        SpacingTrimClass::MiddleDot => (trim / 2., trim / 2.),
+        SpacingTrimClass::Other => (0., 0.),
+    }
 }
 
 #[inline(always)]

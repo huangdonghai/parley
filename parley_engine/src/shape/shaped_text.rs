@@ -14,6 +14,7 @@ use skrifa::raw::TableProvider as _;
 use skrifa::{
     GlyphId, MetadataProvider,
     instance::{LocationRef, Size},
+    metrics::GlyphMetrics,
 };
 
 use crate::{
@@ -427,16 +428,32 @@ impl ShapedText {
                         .map(|(origin, advance)| (origin * font_size, advance * font_size))
                         .unwrap_or((fallback_origin, *font_size))
                 };
+                let trim_class = self.characters[cluster.chars_range().start as usize]
+                    .flags
+                    .spacing_trim_class();
+                let scale = font_size / upem;
 
                 if cluster.has_inline_glyph() {
-                    let (origin, advance) = vertical_for(cluster.glyph_offset);
+                    let glyph_id = cluster.glyph_offset;
+                    let (origin, advance) = vertical_for(glyph_id);
+                    let trim_blanks = if trim_class != SpacingTrimClass::Other {
+                        vertical_trim_blanks(&glyph_metrics, glyph_id, origin, advance, scale)
+                    } else {
+                        None
+                    };
                     let cluster = &mut self.shaped_clusters[cluster_index as usize];
                     cluster.advance = advance;
                     cluster.vertical_origin = origin;
                     cluster.vertical_advance = advance;
+                    if let Some((leading, trailing)) = trim_blanks {
+                        cluster.trim_leading_blank = leading;
+                        cluster.trim_trailing_blank = trailing;
+                        cluster.flags = cluster.flags.with_trim_blanks(true);
+                    }
                 } else {
                     let start = cluster.glyph_offset as usize;
                     let end = start + usize::from(cluster.glyph_len());
+                    let first_glyph_id = self.glyphs[start].id;
                     let mut advance = 0.;
                     let mut origin = 0.;
                     for (glyph_index, glyph) in self.glyphs[start..end].iter_mut().enumerate() {
@@ -448,10 +465,26 @@ impl ShapedText {
                         }
                         advance += glyph_advance;
                     }
+                    let trim_blanks = if trim_class != SpacingTrimClass::Other {
+                        vertical_trim_blanks(
+                            &glyph_metrics,
+                            first_glyph_id,
+                            origin,
+                            advance,
+                            scale,
+                        )
+                    } else {
+                        None
+                    };
                     let cluster = &mut self.shaped_clusters[cluster_index as usize];
                     cluster.advance = advance;
                     cluster.vertical_origin = origin;
                     cluster.vertical_advance = advance;
+                    if let Some((leading, trailing)) = trim_blanks {
+                        cluster.trim_leading_blank = leading;
+                        cluster.trim_trailing_blank = trailing;
+                        cluster.flags = cluster.flags.with_trim_blanks(true);
+                    }
                 }
             }
 
@@ -730,16 +763,14 @@ impl ShapedText {
                 index
             });
 
-        let metrics = {
-            let font = &self.fonts[font_index];
-            let font_ref =
-                skrifa::FontRef::from_index(font.font.data.as_ref(), font.font.index).unwrap();
-            skrifa::metrics::Metrics::new(
-                &font_ref,
-                Size::new(options.font_size),
-                normalized_coords,
-            )
-        };
+        let font = &self.fonts[font_index];
+        let font_ref =
+            skrifa::FontRef::from_index(font.font.data.as_ref(), font.font.index).unwrap();
+        let metrics = skrifa::metrics::Metrics::new(
+            &font_ref,
+            Size::new(options.font_size),
+            normalized_coords,
+        );
         let units_per_em = metrics.units_per_em as f32;
         let font_metrics = FontMetrics::from_skrifa_metrics(&metrics, options.font_size);
 
@@ -804,6 +835,37 @@ impl ShapedText {
                     self.glyphs[start..start + cluster.glyph_len() as usize].reverse();
                 }
             }
+        }
+
+        let glyph_metrics = font_ref.glyph_metrics(Size::unscaled(), LocationRef::default());
+        let (shaped_clusters, glyphs, characters) = (
+            &mut self.shaped_clusters,
+            &self.glyphs,
+            &self.characters,
+        );
+        for cluster in &mut shaped_clusters[shaped_clusters_start..] {
+            if characters[cluster.chars_range().start as usize]
+                .flags
+                .spacing_trim_class()
+                == SpacingTrimClass::Other
+            {
+                continue;
+            }
+            let Some((glyph_id, glyph_x)) = cluster_first_glyph(cluster, glyphs) else {
+                continue;
+            };
+            let Some((leading, trailing)) = horizontal_trim_blanks(
+                &glyph_metrics,
+                glyph_id,
+                glyph_x,
+                cluster.advance,
+                scale_factor,
+            ) else {
+                continue;
+            };
+            cluster.trim_leading_blank = leading;
+            cluster.trim_trailing_blank = trailing;
+            cluster.flags = cluster.flags.with_trim_blanks(true);
         }
 
         let shaped_clusters_range = shaped_clusters_start as u32..self.shaped_clusters.len() as u32;
@@ -900,6 +962,49 @@ impl VerticalAdvanceFeatures {
     }
 }
 
+/// The first glyph of a cluster and its horizontal paint offset.
+fn cluster_first_glyph(cluster: &ShapedCluster, glyphs: &[Glyph]) -> Option<(u32, f32)> {
+    if cluster.glyph_len() == 0 {
+        None
+    } else if cluster.has_inline_glyph() {
+        Some((cluster.glyph_offset, 0.))
+    } else {
+        let glyph = glyphs.get(cluster.glyph_offset as usize)?;
+        Some((glyph.id, glyph.x))
+    }
+}
+
+/// Blank space before and after a glyph's ink on the horizontal inline axis.
+fn horizontal_trim_blanks(
+    glyph_metrics: &GlyphMetrics<'_>,
+    glyph_id: u32,
+    glyph_x: f32,
+    advance: f32,
+    scale: f32,
+) -> Option<(f32, f32)> {
+    let bounds = glyph_metrics.bounds(GlyphId::new(glyph_id))?;
+    let leading = (glyph_x + bounds.x_min * scale).clamp(0., advance);
+    let trailing = (advance - glyph_x - bounds.x_max * scale).clamp(0., advance);
+    Some((leading, trailing))
+}
+
+/// Blank space before and after a glyph's ink on the vertical inline axis.
+///
+/// The vertical origin is the pen position, measured downwards. Font bounds
+/// use a Y-up coordinate system, so the ink's top is `origin - y_max`.
+fn vertical_trim_blanks(
+    glyph_metrics: &GlyphMetrics<'_>,
+    glyph_id: u32,
+    origin: f32,
+    advance: f32,
+    scale: f32,
+) -> Option<(f32, f32)> {
+    let bounds = glyph_metrics.bounds(GlyphId::new(glyph_id))?;
+    let leading = (origin - bounds.y_max * scale).clamp(0., advance);
+    let trailing = (advance - origin + bounds.y_min * scale).clamp(0., advance);
+    Some((leading, trailing))
+}
+
 /// Processes shaped glyphs from `HarfRust` and converts them into `ShapedCluster` and `Glyph`.
 ///
 /// # Parameters
@@ -980,6 +1085,8 @@ fn process_shaped_clusters<'a>(
             vertical_origin: 0.,
             vertical_advance: 0.,
             horizontal_advance,
+            trim_leading_blank: 0.,
+            trim_trailing_blank: 0.,
         });
     }
 

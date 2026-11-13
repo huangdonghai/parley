@@ -16,11 +16,10 @@ use windows::{
         DWRITE_FACTORY_TYPE_SHARED, DWRITE_FONT_STRETCH_NORMAL, DWRITE_FONT_STYLE_NORMAL,
         DWRITE_FONT_WEIGHT_REGULAR, DWRITE_INFORMATIONAL_STRING_FULL_NAME,
         DWRITE_INFORMATIONAL_STRING_POSTSCRIPT_NAME, DWRITE_READING_DIRECTION,
-        DWRITE_READING_DIRECTION_LEFT_TO_RIGHT, DWriteCreateFactory,
-        IDWriteFactory, IDWriteFactory2, IDWriteFont, IDWriteFontCollection, IDWriteFontFace,
-        IDWriteFontFallback, IDWriteFontFamily, IDWriteFontFile, IDWriteLocalFontFileLoader,
-        IDWriteLocalizedStrings, IDWriteNumberSubstitution, IDWriteTextAnalysisSource,
-        IDWriteTextAnalysisSource_Impl,
+        DWRITE_READING_DIRECTION_LEFT_TO_RIGHT, DWriteCreateFactory, IDWriteFactory,
+        IDWriteFactory2, IDWriteFont, IDWriteFontCollection, IDWriteFontFace, IDWriteFontFallback,
+        IDWriteFontFamily, IDWriteFontFile, IDWriteLocalFontFileLoader, IDWriteLocalizedStrings,
+        IDWriteNumberSubstitution, IDWriteTextAnalysisSource, IDWriteTextAnalysisSource_Impl,
     },
     core::{Interface, OutRef, PCWSTR, implement},
 };
@@ -40,6 +39,7 @@ const DEFAULT_GENERIC_FAMILIES: &[(GenericFamily, &[&str])] = &[
     (GenericFamily::Emoji, &["Segoe UI Emoji"]),
     (GenericFamily::Math, &["Cambria Math"]),
     (GenericFamily::FangSong, &["FangSong"]),
+    (GenericFamily::Kai, &["KaiTi"]),
 ];
 
 /// Raw access to the collection of local system fonts.

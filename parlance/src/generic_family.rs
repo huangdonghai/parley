@@ -41,6 +41,8 @@ pub enum GenericFamily {
     /// Song and cursive-style Kai forms. This style is often used for
     /// government documents.
     FangSong = 12,
+    /// A traditional Chinese calligraphic style.
+    Kai = 13,
     // NOTICE: If a new value is added, be sure to modify `MAX_VALUE`.
 }
 
@@ -48,7 +50,7 @@ impl GenericFamily {
     /// Returns the maximum numeric value for known variants.
     ///
     /// This is primarily intended for use in fixed-size maps keyed by `GenericFamily`.
-    pub const MAX_VALUE: u8 = Self::FangSong as u8;
+    pub const MAX_VALUE: u8 = Self::Kai as u8;
 
     /// Parses a generic family from a CSS generic family name.
     ///
@@ -92,6 +94,7 @@ impl GenericFamily {
             b"emoji" => Self::Emoji,
             b"math" => Self::Math,
             b"fangsong" => Self::FangSong,
+            b"kai" => Self::Kai,
             _ => return None,
         })
     }
@@ -112,6 +115,7 @@ impl GenericFamily {
             Self::Emoji,
             Self::Math,
             Self::FangSong,
+            Self::Kai,
         ]
     }
 }
@@ -132,6 +136,7 @@ impl fmt::Display for GenericFamily {
             Self::Emoji => "emoji",
             Self::Math => "math",
             Self::FangSong => "fangsong",
+            Self::Kai => "kai",
         };
         f.write_str(name)
     }
@@ -160,6 +165,7 @@ mod tests {
             GenericFamily::parse("FangSong"),
             Some(GenericFamily::FangSong)
         );
+        assert_eq!(GenericFamily::parse("KAI"), Some(GenericFamily::Kai));
     }
 
     #[test]

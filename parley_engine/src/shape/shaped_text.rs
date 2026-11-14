@@ -260,7 +260,9 @@ impl ShapedText {
     }
 
     /// The ideographic advance of the font at `font_index`, in horizontal and vertical layout
-    /// units. A font without an ideograph is measured with its em square.
+    /// units. A font without an ideograph is measured with its em square; likewise, a font
+    /// without vertical metrics is measured with its em square for the vertical advance, which
+    /// matches the fallback in [`Self::set_vertical_advances`].
     pub fn ideograph_advance(&self, font_index: usize, font_size: f32) -> (f32, f32) {
         let Some(font) = self.fonts.get(font_index) else {
             return (font_size, font_size);
@@ -289,7 +291,7 @@ impl ShapedText {
             .ok()
             .and_then(|vmtx| vmtx.advance(glyph_id))
             .map(to_units)
-            .unwrap_or(horizontal);
+            .unwrap_or(font_size);
 
         (horizontal, vertical)
     }

@@ -8,7 +8,7 @@ use core::ops::Range;
 use alloc::vec::Vec;
 use icu_properties::props::EastAsianWidth;
 use icu_properties::{CodePointMapData, props::VerticalOrientation};
-use parlance::{BidiLevel, NormalizedCoord, TextOrientation};
+use parlance::{BidiLevel, FontFeature, NormalizedCoord, Tag, TextOrientation};
 use parley_data::Properties;
 use skrifa::raw::TableProvider as _;
 use skrifa::{
@@ -731,6 +731,7 @@ impl ShapedText {
         range: TextRange,
         segment: &Segment,
         options: &ShapeOptions<'_>,
+        font_features: &[FontFeature],
         char_info: &[CharInfo],
         char_style_indices: &[u16],
         font: &FontInstance,
@@ -875,7 +876,6 @@ impl ShapedText {
             .iter()
             .map(|cluster| cluster.advance)
             .sum();
-
         self.runs.push(ShapedRun {
             range,
             font_size: options.font_size,
@@ -887,7 +887,8 @@ impl ShapedText {
             bidi_level: segment.bidi_level,
             advance: run_advance,
             font_metrics,
-            vertical_features: VerticalAdvanceFeatures::from_features(options.features),
+            vertical_features: VerticalAdvanceFeatures::from_features(font_features),
+            spacing_trim_overrides: SpacingTrimOverrides::from_features(font_features),
         });
     }
 }
@@ -926,6 +927,8 @@ pub struct ShapedRun {
     /// vertical shaping pass reads. A vertical layout therefore has to fold
     /// them into the advance it takes from `vmtx` by itself.
     pub vertical_features: VerticalAdvanceFeatures,
+    /// Whether explicit width features take precedence over contextual punctuation spacing.
+    pub spacing_trim_overrides: SpacingTrimOverrides,
 }
 
 /// The GPOS features that replace a glyph's vertical advance with a different
@@ -940,12 +943,11 @@ pub struct VerticalAdvanceFeatures {
 }
 
 impl VerticalAdvanceFeatures {
-    /// Which of the two a style's font features turn on.
+    /// Which of the two the run's effective font features turn on.
     ///
-    /// `font-feature-settings` lists features in order and the last value for a
-    /// tag wins, which the resolver has already applied by the time the list
-    /// reaches shaping.
-    pub fn from_features(features: &[parlance::FontFeature]) -> Self {
+    /// Face defaults and style features have already been merged, with the
+    /// style's value taking precedence for duplicate tags.
+    pub fn from_features(features: &[FontFeature]) -> Self {
         let mut on = Self::default();
         for feature in features {
             match &feature.tag.to_bytes() {
@@ -961,6 +963,35 @@ impl VerticalAdvanceFeatures {
     #[inline(always)]
     pub fn any(self) -> bool {
         self.vhal || self.vpal
+    }
+}
+
+/// Explicit width-feature settings that suppress contextual punctuation spacing.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub struct SpacingTrimOverrides {
+    /// Whether a horizontal width feature is enabled.
+    pub horizontal: bool,
+    /// Whether a vertical width feature is enabled.
+    pub vertical: bool,
+}
+
+impl SpacingTrimOverrides {
+    /// Which width features the run's effective settings enable.
+    pub fn from_features(features: &[FontFeature]) -> Self {
+        fn enabled(features: &[FontFeature], tags: &[[u8; 4]]) -> bool {
+            tags.iter().any(|tag| {
+                features
+                    .iter()
+                    .rev()
+                    .find(|feature| feature.tag == Tag::new(tag))
+                    .is_some_and(|feature| feature.value != 0)
+            })
+        }
+
+        Self {
+            horizontal: enabled(features, &[*b"halt", *b"palt", *b"pwid", *b"hwid"]),
+            vertical: enabled(features, &[*b"vhal", *b"vpal", *b"pwid", *b"hwid"]),
+        }
     }
 }
 
@@ -1238,8 +1269,8 @@ mod tests {
     use linebender_resource_handle::{Blob, FontData};
 
     use crate::{
-        Analysis, AnalysisOptions, Analyzer, FontInstance, FontInstanceRef, FontSelector,
-        ShapeOptions, Shaper,
+        Analysis, AnalysisOptions, Analyzer, FontInstance, FontSelection,
+        FontSelector, ShapeOptions, Shaper,
         itemize::{Item, Segment},
         shape::CharCluster,
     };
@@ -1364,8 +1395,8 @@ mod tests {
             _item: &Segment,
             _options: &ShapeOptions<'_>,
             _cluster: &mut CharCluster,
-        ) -> Option<FontInstanceRef<'_>> {
-            Some(self.0.as_ref())
+        ) -> Option<FontSelection<'_>> {
+            Some(self.0.as_ref().into())
         }
     }
 
@@ -1383,11 +1414,11 @@ mod tests {
             _segment: &Segment,
             _options: &ShapeOptions<'_>,
             cluster: &mut CharCluster,
-        ) -> Option<FontInstanceRef<'_>> {
+        ) -> Option<FontSelection<'_>> {
             if cluster.chars()[0].ch == self.ch {
-                Some(self.font.as_ref())
+                Some(self.font.as_ref().into())
             } else {
-                Some(self.other_font.as_ref())
+                Some(self.other_font.as_ref().into())
             }
         }
     }

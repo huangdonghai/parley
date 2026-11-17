@@ -7,7 +7,8 @@
 use alloc::vec::Vec;
 use parley_engine::shape::{AutoSpaceStyle, CharCluster, Coverage};
 use parley_engine::{
-    Analysis, AnalysisDataSources, FontInstance, FontInstanceRef, ShapeOptions, Shaper,
+    Analysis, AnalysisDataSources, FontInstance, FontInstanceRef, FontSelection, ShapeOptions,
+    Shaper,
 };
 use smallvec::SmallVec;
 
@@ -265,6 +266,7 @@ pub(crate) fn shape_text<'a, B: Brush>(
         let run_text_byte_start = shaped_run.range.byte_range.start;
         let run_style_index = char_style_indices[shaped_run.range.char_range.start];
         let run_style = &styles[usize::from(run_style_index)];
+        let spacing_trim_overrides = shaped_run.spacing_trim_overrides;
         let (autospace_horizontal, autospace_vertical) =
             if run_style.text_autospace == crate::TextAutospace::Normal {
                 layout
@@ -308,8 +310,8 @@ pub(crate) fn shape_text<'a, B: Brush>(
             )
             .with_hanging(run_style.hanging_punctuation)
             .with_width_features(
-                overrides_spacing_trim(&style_features[run_style_index as usize], false),
-                overrides_spacing_trim(&style_features[run_style_index as usize], true),
+                spacing_trim_overrides.horizontal,
+                spacing_trim_overrides.vertical,
             ),
             char_style_indices,
         );
@@ -321,22 +323,6 @@ pub(crate) fn shape_text<'a, B: Brush>(
             .data
             .push_inline_box(box_idx, box_bidi_levels[box_idx]);
     }
-}
-
-/// Explicit width features take precedence over contextual punctuation spacing.
-fn overrides_spacing_trim(features: &[FontFeature], vertical: bool) -> bool {
-    let tags = if vertical {
-        [*b"vhal", *b"vpal", *b"pwid", *b"hwid"]
-    } else {
-        [*b"halt", *b"palt", *b"pwid", *b"hwid"]
-    };
-    tags.iter().any(|tag| {
-        features
-            .iter()
-            .rev()
-            .find(|feature| feature.tag == Tag::new(tag))
-            .is_some_and(|feature| feature.value != 0)
-    })
 }
 
 /// Language-dependent `text-spacing-trim` class override, if any.
@@ -434,7 +420,7 @@ impl<'a, 'b, B: Brush> parley_engine::FontSelector for FontSelector<'a, 'b, B> {
         _segment: &parley_engine::itemize::Segment,
         _options: &ShapeOptions<'_>,
         cluster: &mut CharCluster,
-    ) -> Option<FontInstanceRef<'_>> {
+    ) -> Option<FontSelection<'_>> {
         let style_index = cluster.style_index();
         let is_emoji = cluster.is_emoji();
 
@@ -504,10 +490,9 @@ impl<'a, 'b, B: Brush> parley_engine::FontSelector for FontSelector<'a, 'b, B> {
                 self.fonts_id = None;
             }
 
-            return if let LastResortFont::Resolved(ref font) = self.last_resort_font {
-                Some(font.as_ref())
-            } else {
-                None
+            return match &self.last_resort_font {
+                LastResortFont::Resolved(font) => Some(font.as_ref().into()),
+                LastResortFont::Unresolved | LastResortFont::Unavailable => None,
             };
         }
 
@@ -557,11 +542,15 @@ impl<'a, 'b, B: Brush> parley_engine::FontSelector for FontSelector<'a, 'b, B> {
             }
         });
 
-        selected_font.map(|font| FontInstanceRef {
-            data: &font.blob,
-            index: font.index,
-            synthesis: &font.synthesis,
-        })
+        let selection = selected_font.map(|font| FontSelection {
+            font: FontInstanceRef {
+                data: &font.blob,
+                index: font.index,
+                synthesis: &font.synthesis,
+            },
+            face_features: font.font_features(),
+        });
+        selection
     }
 }
 
@@ -606,13 +595,18 @@ mod tests {
         let enabled = |tag| FontFeature::new(tag, 1);
         let vhal = [enabled(Tag::new(b"vhal"))];
         let halt = [enabled(Tag::new(b"halt"))];
-        assert!(!overrides_spacing_trim(&vhal, false));
-        assert!(overrides_spacing_trim(&vhal, true));
-        assert!(overrides_spacing_trim(&halt, false));
-        assert!(!overrides_spacing_trim(&halt, true));
-        assert!(!overrides_spacing_trim(
-            &[FontFeature::new(Tag::new(b"vhal"), 0)],
-            true
-        ));
+        let vhal_overrides = parley_engine::shape::SpacingTrimOverrides::from_features(&vhal);
+        let halt_overrides = parley_engine::shape::SpacingTrimOverrides::from_features(&halt);
+        assert!(!vhal_overrides.horizontal);
+        assert!(vhal_overrides.vertical);
+        assert!(halt_overrides.horizontal);
+        assert!(!halt_overrides.vertical);
+        assert!(
+            !parley_engine::shape::SpacingTrimOverrides::from_features(&[FontFeature::new(
+                Tag::new(b"vhal"),
+                0
+            ),])
+            .vertical
+        );
     }
 }

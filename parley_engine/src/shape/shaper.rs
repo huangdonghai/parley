@@ -70,6 +70,24 @@ pub struct FontInstanceRef<'a> {
     pub synthesis: &'a fontique::Synthesis,
 }
 
+/// A selected face and its `@font-face` feature defaults.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct FontSelection<'a> {
+    /// The face selected for this text cluster.
+    pub font: FontInstanceRef<'a>,
+    /// Feature settings declared on that exact face.
+    pub face_features: &'a [FontFeature],
+}
+
+impl<'a> From<FontInstanceRef<'a>> for FontSelection<'a> {
+    fn from(font: FontInstanceRef<'a>) -> Self {
+        Self {
+            font,
+            face_features: &[],
+        }
+    }
+}
+
 impl From<FontInstanceRef<'_>> for FontInstance {
     #[inline]
     fn from(font: FontInstanceRef<'_>) -> Self {
@@ -262,17 +280,17 @@ fn shape_segment(
         .language
         .as_ref()
         .and_then(|lang| lang.as_str().parse::<harfrust::Language>().ok());
-    scx.features.clear();
-    scx.features.extend(options.features.iter().map(|feature| {
-        harfrust::Feature::new(
-            harfrust::Tag::new(&feature.tag.to_bytes()),
-            feature.value as u32,
-            ..,
-        )
-    }));
-
-    // Shape a run of the segment with a single font, appending it to `shaped_text`.
-    let mut shape_run = |font: &FontInstance, range: TextRange| {
+    // Shape a run of the segment with a single font and effective feature set, appending it to
+    // `shaped_text`.
+    let mut shape_run = |font: &FontInstance, features: &[FontFeature], range: TextRange| {
+        scx.features.clear();
+        scx.features.extend(features.iter().map(|feature| {
+            harfrust::Feature::new(
+                harfrust::Tag::new(&feature.tag.to_bytes()),
+                feature.value as u32,
+                ..,
+            )
+        }));
         // TODO: How do we want to handle errors like this?
         let font_ref =
             harfrust::FontRef::from_index(font.font.data.as_ref(), font.font.index).unwrap();
@@ -359,12 +377,12 @@ fn shape_segment(
                 .features(&scx.features)
                 .point_size(Some(options.font_size)),
         );
-
         shaped_text.push_run(
             text,
             range,
             segment,
             options,
+            features,
             char_info,
             char_style_indices,
             font,
@@ -378,7 +396,7 @@ fn shape_segment(
 
     // This is the run being accumulated, i.e., consecutive graphemes for which `select_font`
     // returns the same font.
-    let mut run: Option<(FontInstance, TextRange)> = None;
+    let mut run: Option<(FontInstance, Vec<FontFeature>, TextRange)> = None;
 
     // The segment's characters with their analysis data and style indices.
     let mut chars = segment_text
@@ -405,28 +423,88 @@ fn shape_segment(
             char_range: char_start..char_end,
         };
 
-        let font = select_font
+        let selection = select_font
             .select_font(segment, options, char_cluster)
             .ok_or(())?;
 
-        if let Some((run_font, run_range)) = &mut run
-            && run_font.as_ref() == font
+        if let Some((run_font, run_features, run_range)) = &mut run
+            && run_font.as_ref() == selection.font
+            && effective_features_match(run_features, selection.face_features, options.features)
         {
             run_range.byte_range.end = byte_end;
             run_range.char_range.end = char_end;
         } else {
-            if let Some((run_font, run_range)) = run.take() {
-                // The font changed: shape the previous run.
-                shape_run(&run_font, run_range);
+            if let Some((run_font, run_features, run_range)) = run.take() {
+                // The font or its effective feature settings changed: shape the previous run.
+                shape_run(&run_font, &run_features, run_range);
             }
-            run = Some((font.into(), grapheme));
+            let features = merge_features(selection.face_features, options.features);
+            run = Some((selection.font.into(), features, grapheme));
         }
     }
-    if let Some((run_font, run_range)) = run {
-        shape_run(&run_font, run_range);
+    if let Some((run_font, run_features, run_range)) = run {
+        shape_run(&run_font, &run_features, run_range);
     }
 
     Ok(())
+}
+
+fn effective_feature_value(
+    face_features: &[FontFeature],
+    style_features: &[FontFeature],
+    tag: parlance::Tag,
+) -> Option<u16> {
+    style_features
+        .iter()
+        .rev()
+        .find(|feature| feature.tag == tag)
+        .or_else(|| {
+            face_features
+                .iter()
+                .rev()
+                .find(|feature| feature.tag == tag)
+        })
+        .map(|feature| feature.value)
+}
+
+/// Whether a run's normalized feature settings match a selected face and text style.
+fn effective_features_match(
+    run_features: &[FontFeature],
+    face_features: &[FontFeature],
+    style_features: &[FontFeature],
+) -> bool {
+    run_features.iter().all(|feature| {
+        effective_feature_value(face_features, style_features, feature.tag) == Some(feature.value)
+    }) && face_features.iter().chain(style_features).all(|feature| {
+        let Some(value) = effective_feature_value(face_features, style_features, feature.tag)
+        else {
+            return false;
+        };
+        run_features
+            .iter()
+            .any(|run_feature| run_feature.tag == feature.tag && run_feature.value == value)
+    })
+}
+
+/// Merge face defaults with text-style settings, which take precedence for duplicate tags.
+fn merge_features(
+    face_features: &[FontFeature],
+    style_features: &[FontFeature],
+) -> Vec<FontFeature> {
+    let mut features: Vec<FontFeature> =
+        Vec::with_capacity(face_features.len() + style_features.len());
+    for feature in face_features.iter().chain(style_features) {
+        if let Some(existing) = features
+            .iter_mut()
+            .find(|existing| existing.tag == feature.tag)
+        {
+            *existing = *feature;
+        } else {
+            features.push(*feature);
+        }
+    }
+    features.sort_by_key(|feature| feature.tag);
+    features
 }
 
 #[inline]
@@ -472,5 +550,5 @@ pub trait FontSelector {
         segment: &Segment,
         options: &ShapeOptions<'_>,
         cluster: &mut CharCluster,
-    ) -> Option<FontInstanceRef<'_>>;
+    ) -> Option<FontSelection<'_>>;
 }

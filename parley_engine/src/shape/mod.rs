@@ -15,6 +15,6 @@ pub use data::{
     AutoSpaceClass, Character, CharacterFlags, HangingPunctuationClass, ShapedCluster,
     SpacingTrimClass,
 };
-pub use shaped_text::AutoSpaceStyle;
+pub use shaped_text::{AutoSpaceStyle, SpacingTrimOverrides};
 
 pub(crate) use data::ShapedClusterFlags;

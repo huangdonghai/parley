@@ -9,7 +9,7 @@ use alloc::vec::Vec;
 
 use super::source::{SourceInfo, SourceKind};
 use super::{Blob, source_cache::SourceCache};
-use crate::{FontStyle, FontWeight, FontWidth};
+use crate::{FontFeature, FontStyle, FontWeight, FontWidth};
 use core::fmt;
 use read_fonts::{FontRef, TableProvider as _, types::NameId, types::Tag};
 use smallvec::SmallVec;
@@ -46,6 +46,8 @@ pub struct FontInfo {
     charmap_index: CharmapIndex,
     /// CSS `@font-face` ranges; `None` means the face is eligible for all codepoints.
     unicode_ranges: Option<Vec<FontUnicodeRange>>,
+    /// OpenType feature defaults declared by this `@font-face`.
+    font_features: Vec<FontFeature>,
 }
 
 impl FontInfo {
@@ -268,6 +270,11 @@ impl FontInfo {
     pub fn unicode_ranges(&self) -> Option<&[FontUnicodeRange]> {
         self.unicode_ranges.as_deref()
     }
+
+    /// OpenType feature defaults declared by this font face.
+    pub fn font_features(&self) -> &[FontFeature] {
+        &self.font_features
+    }
 }
 
 impl FontInfo {
@@ -314,6 +321,7 @@ impl FontInfo {
             attr_axes,
             charmap_index,
             unicode_ranges: None,
+            font_features: Vec::new(),
         })
     }
 
@@ -347,6 +355,9 @@ impl FontInfo {
         }
         if let Some(unicode_ranges) = info_override.unicode_ranges {
             self.unicode_ranges = Some(unicode_ranges.to_vec());
+        }
+        if let Some(font_features) = info_override.font_features {
+            self.font_features = font_features.to_vec();
         }
         if let Some(axes) = info_override.axes {
             // This is O(n^2) but no font should have enough axes for that to
@@ -547,6 +558,8 @@ pub struct FontInfoOverride<'a> {
     pub weight: Option<FontWeight>,
     /// CSS `unicode-range` intervals that constrain where this face is eligible.
     pub unicode_ranges: Option<&'a [FontUnicodeRange]>,
+    /// OpenType feature defaults declared by this `@font-face`.
+    pub font_features: Option<&'a [FontFeature]>,
     /// Default values for the font's variation axes. Axes not included within
     /// the font will be ignored.
     pub axes: Option<&'a [(Tag, f32)]>,
@@ -602,6 +615,19 @@ mod tests {
 
         let synthesis = font.synthesis(font.width(), font.style(), FontWeight::THIN);
         assert!(!synthesis.any());
+    }
+
+    #[test]
+    fn font_feature_override_is_retained_on_the_face() {
+        use parlance::Tag;
+
+        let mut font = font_info(ROBOTO);
+        let features = [FontFeature::new(Tag::new(b"halt"), 1)];
+        font.apply_override(&FontInfoOverride {
+            font_features: Some(&features),
+            ..Default::default()
+        });
+        assert_eq!(font.font_features(), &features);
     }
 
     #[test]

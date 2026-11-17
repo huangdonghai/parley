@@ -64,7 +64,7 @@ pub use fallback::FallbackKey;
 pub use family::{FamilyId, FamilyInfo};
 pub use font::{AxisInfo, FontInfo, FontInfoOverride, FontUnicodeRange, Synthesis};
 pub use impl_fontconfig::FromFontconfig;
-pub use parlance::{FontStyle, FontWeight, FontWidth, GenericFamily, Language, Script};
+pub use parlance::{FontFeature, FontStyle, FontWeight, FontWidth, GenericFamily, Language, Script};
 pub use source::{SourceId, SourceInfo, SourceKind};
 
 #[cfg(all(feature = "system", target_vendor = "apple"))]

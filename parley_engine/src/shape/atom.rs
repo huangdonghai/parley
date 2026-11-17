@@ -864,7 +864,7 @@ mod tests {
     use linebender_resource_handle::{Blob, FontData};
 
     use crate::{
-        Analysis, AnalysisOptions, Analyzer, FontInstance, FontInstanceRef, FontSelector,
+        Analysis, AnalysisOptions, Analyzer, FontInstance, FontSelection, FontSelector,
         ShapeOptions, ShapedText, Shaper,
         itemize::{Item, Segment},
         shape::CharCluster,
@@ -882,8 +882,8 @@ mod tests {
             _segment: &Segment,
             _options: &ShapeOptions<'_>,
             _cluster: &mut CharCluster,
-        ) -> Option<FontInstanceRef<'_>> {
-            Some(self.0.as_ref())
+        ) -> Option<FontSelection<'_>> {
+            Some(self.0.as_ref().into())
         }
     }
 

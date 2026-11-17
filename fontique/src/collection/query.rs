@@ -13,8 +13,8 @@ use smallvec::SmallVec;
 
 use super::{
     super::{
-        Attributes, Blob, FallbackKey, FamilyId, FamilyInfo, FontUnicodeRange, GenericFamily,
-        Synthesis,
+        Attributes, Blob, FallbackKey, FamilyId, FamilyInfo, FontFeature, FontUnicodeRange,
+        GenericFamily, Synthesis,
     },
     Inner,
 };
@@ -258,6 +258,8 @@ pub struct QueryFont {
     pub charmap_index: CharmapIndex,
     /// CSS `unicode-range` intervals, or `None` when the face has no range restriction.
     pub unicode_ranges: Option<Vec<FontUnicodeRange>>,
+    /// `@font-face` feature defaults for this exact face.
+    pub font_features: Vec<FontFeature>,
 }
 
 impl QueryFont {
@@ -266,6 +268,11 @@ impl QueryFont {
         self.unicode_ranges
             .as_ref()
             .is_none_or(|ranges| ranges.iter().any(|range| range.contains(codepoint)))
+    }
+
+    /// The face's OpenType feature defaults.
+    pub fn font_features(&self) -> &[FontFeature] {
+        &self.font_features
     }
 
     /// Attempts to construct a [Charmap] for this font.
@@ -312,6 +319,7 @@ fn load_bucket<'a>(
                     ),
                     charmap_index: font_info.charmap_index(),
                     unicode_ranges: font_info.unicode_ranges().map(<[_]>::to_vec),
+                    font_features: font_info.font_features().to_vec(),
                 });
             }
             if fonts.is_empty() {
@@ -352,6 +360,7 @@ fn load_font<'a>(
                 synthesis,
                 charmap_index: font_info.charmap_index(),
                 unicode_ranges: font_info.unicode_ranges().map(<[_]>::to_vec),
+                font_features: font_info.font_features().to_vec(),
             });
             if let Entry::Ok(font) = status {
                 Some(font)
@@ -389,14 +398,62 @@ impl CachedFamily {
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
+    use std::vec::Vec;
 
+    use super::QueryStatus;
     use crate::{
-        Blob, Collection, CollectionOptions, FontInfoOverride, FontUnicodeRange, QueryFamily,
-        SourceCache,
+        Blob, Collection, CollectionOptions, FontFeature, FontInfoOverride, FontUnicodeRange,
+        QueryFamily, SourceCache,
     };
+    use parlance::Tag;
 
     const ROBOTO: &[u8] =
         include_bytes!("../../../parley_dev/assets/fonts/roboto_fonts/Roboto-Regular.ttf");
+
+    #[test]
+    fn same_family_faces_keep_distinct_feature_settings() {
+        let mut collection = Collection::new(CollectionOptions {
+            shared: false,
+            system_fonts: false,
+        });
+        let first_range = [FontUnicodeRange::new(0xFF08, 0xFF08)];
+        let second_range = [FontUnicodeRange::new(0x56FD, 0x56FD)];
+        let first_features = [FontFeature::new(Tag::new(b"halt"), 1)];
+        let second_features = [FontFeature::new(Tag::new(b"halt"), 0)];
+        let data = Blob::new(Arc::new(ROBOTO.to_vec()));
+        collection.register_fonts(
+            data.clone(),
+            Some(FontInfoOverride {
+                family_name: Some("SubsetFamily"),
+                unicode_ranges: Some(&first_range),
+                font_features: Some(&first_features),
+                ..Default::default()
+            }),
+        );
+        collection.register_fonts(
+            data,
+            Some(FontInfoOverride {
+                family_name: Some("SubsetFamily"),
+                unicode_ranges: Some(&second_range),
+                font_features: Some(&second_features),
+                ..Default::default()
+            }),
+        );
+
+        let family = collection.family_id("SubsetFamily").unwrap();
+        let mut source_cache = SourceCache::default();
+        let mut query = collection.query(&mut source_cache);
+        query.set_families([QueryFamily::Id(family)]);
+        let mut faces = Vec::new();
+        query.matches_with(|font| {
+            faces.push((font.unicode_ranges.clone(), font.font_features.clone()));
+            QueryStatus::Continue
+        });
+
+        assert_eq!(faces.len(), 2);
+        assert_eq!(faces[0], (Some(first_range.to_vec()), first_features.to_vec()));
+        assert_eq!(faces[1], (Some(second_range.to_vec()), second_features.to_vec()));
+    }
 
     #[test]
     fn first_available_skips_faces_without_space_in_unicode_range() {

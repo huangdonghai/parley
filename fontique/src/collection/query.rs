@@ -12,7 +12,10 @@ use parlance::Script;
 use smallvec::SmallVec;
 
 use super::{
-    super::{Attributes, Blob, FallbackKey, FamilyId, FamilyInfo, GenericFamily, Synthesis},
+    super::{
+        Attributes, Blob, FallbackKey, FamilyId, FamilyInfo, FontUnicodeRange, GenericFamily,
+        Synthesis,
+    },
     Inner,
 };
 
@@ -174,13 +177,16 @@ impl<'a> Query<'a> {
     /// Returns the [first available font] for the current settings: the first
     /// font that [`matches_with`](Self::matches_with) would yield, if any.
     ///
-    /// CSS additionally requires the font's `unicode-range` to include U+0020
-    /// SPACE; fontique has no `unicode-range`, so every available font qualifies.
+    /// CSS Fonts requires the first available font's `unicode-range` to include U+0020 SPACE.
+    /// The face need not actually contain a space glyph.
     ///
     /// [first available font]: https://drafts.csswg.org/css-fonts-4/#first-available-font
     pub fn first_available_font(&mut self) -> Option<QueryFont> {
         let mut found = None;
         self.matches_with(|font| {
+            if !font.matches_unicode_range(0x20) {
+                return QueryStatus::Continue;
+            }
             found = Some(font.clone());
             QueryStatus::Stop
         });
@@ -250,9 +256,18 @@ pub struct QueryFont {
     pub synthesis: Synthesis,
     /// Data used for constructing a character map for this font.
     pub charmap_index: CharmapIndex,
+    /// CSS `unicode-range` intervals, or `None` when the face has no range restriction.
+    pub unicode_ranges: Option<Vec<FontUnicodeRange>>,
 }
 
 impl QueryFont {
+    /// Whether this face is eligible for a codepoint under its `unicode-range` descriptor.
+    pub fn matches_unicode_range(&self, codepoint: u32) -> bool {
+        self.unicode_ranges
+            .as_ref()
+            .is_none_or(|ranges| ranges.iter().any(|range| range.contains(codepoint)))
+    }
+
     /// Attempts to construct a [Charmap] for this font.
     pub fn charmap(&self) -> Option<Charmap<'_>> {
         self.charmap_index.charmap(self.blob.as_ref())
@@ -296,6 +311,7 @@ fn load_bucket<'a>(
                         attributes.weight,
                     ),
                     charmap_index: font_info.charmap_index(),
+                    unicode_ranges: font_info.unicode_ranges().map(<[_]>::to_vec),
                 });
             }
             if fonts.is_empty() {
@@ -335,6 +351,7 @@ fn load_font<'a>(
                 index: blob_index,
                 synthesis,
                 charmap_index: font_info.charmap_index(),
+                unicode_ranges: font_info.unicode_ranges().map(<[_]>::to_vec),
             });
             if let Entry::Ok(font) = status {
                 Some(font)
@@ -366,6 +383,59 @@ impl CachedFamily {
     fn clear_fonts(&mut self) {
         self.best = Entry::Vacant;
         self.default = Entry::Vacant;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use crate::{
+        Blob, Collection, CollectionOptions, FontInfoOverride, FontUnicodeRange, QueryFamily,
+        SourceCache,
+    };
+
+    const ROBOTO: &[u8] =
+        include_bytes!("../../../parley_dev/assets/fonts/roboto_fonts/Roboto-Regular.ttf");
+
+    #[test]
+    fn first_available_skips_faces_without_space_in_unicode_range() {
+        let mut collection = Collection::new(CollectionOptions {
+            shared: false,
+            system_fonts: false,
+        });
+        let ascii_letters = [FontUnicodeRange::new(0x41, 0x5A)];
+        let with_space = [FontUnicodeRange::new(0x20, 0x7E)];
+        let data = Blob::new(Arc::new(ROBOTO.to_vec()));
+        collection.register_fonts(
+            data.clone(),
+            Some(FontInfoOverride {
+                family_name: Some("LettersOnly"),
+                unicode_ranges: Some(&ascii_letters),
+                ..Default::default()
+            }),
+        );
+        collection.register_fonts(
+            data,
+            Some(FontInfoOverride {
+                family_name: Some("HasSpace"),
+                unicode_ranges: Some(&with_space),
+                ..Default::default()
+            }),
+        );
+        let letters_id = collection.family_id("LettersOnly").unwrap();
+        let space_id = collection.family_id("HasSpace").unwrap();
+        let mut source_cache = SourceCache::default();
+        let mut query = collection.query(&mut source_cache);
+        query.set_families([QueryFamily::Id(letters_id), QueryFamily::Id(space_id)]);
+
+        let first_available = query.first_available_font().unwrap();
+        assert_eq!(first_available.family.0, space_id);
+        assert!(first_available.matches_unicode_range(0x20));
+        assert!(!first_available.matches_unicode_range(0x7F));
+
+        query.set_families([QueryFamily::Id(letters_id)]);
+        assert!(query.first_available_font().is_none());
     }
 }
 

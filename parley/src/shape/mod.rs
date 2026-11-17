@@ -519,6 +519,15 @@ impl<'a, 'b, B: Brush> parley_engine::FontSelector for FontSelector<'a, 'b, B> {
                 return fontique::QueryStatus::Continue;
             };
 
+            // Parley chooses one face for a shaping cluster. Treat the face's effective cmap
+            // as the intersection of its cmap and `unicode-range`: if any shaping character in
+            // the cluster is outside the descriptor, leave the whole cluster to font fallback.
+            let range_covers_cluster = cluster.chars().iter().all(|character| {
+                !character.contributes_to_shaping || font.matches_unicode_range(character.ch as u32)
+            });
+            if !range_covers_cluster {
+                return fontique::QueryStatus::Continue;
+            }
             let coverage = cluster.calculate_coverage(
                 |ch| {
                     charmap

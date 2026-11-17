@@ -5,6 +5,8 @@
 
 use crate::CharmapIndex;
 
+use alloc::vec::Vec;
+
 use super::source::{SourceInfo, SourceKind};
 use super::{Blob, source_cache::SourceCache};
 use crate::{FontStyle, FontWeight, FontWidth};
@@ -13,6 +15,23 @@ use read_fonts::{FontRef, TableProvider as _, types::NameId, types::Tag};
 use smallvec::SmallVec;
 
 type AxisVec = SmallVec<[AxisInfo; 1]>;
+
+/// Inclusive Unicode codepoint interval from a CSS `unicode-range` descriptor.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub struct FontUnicodeRange {
+    pub start: u32,
+    pub end: u32,
+}
+
+impl FontUnicodeRange {
+    pub const fn new(start: u32, end: u32) -> Self {
+        Self { start, end }
+    }
+
+    pub fn contains(self, codepoint: u32) -> bool {
+        self.start <= codepoint && codepoint <= self.end
+    }
+}
 
 /// Representation of a single font in a family.
 #[derive(Clone, Debug)]
@@ -25,6 +44,8 @@ pub struct FontInfo {
     axes: AxisVec,
     attr_axes: u8,
     charmap_index: CharmapIndex,
+    /// CSS `@font-face` ranges; `None` means the face is eligible for all codepoints.
+    unicode_ranges: Option<Vec<FontUnicodeRange>>,
 }
 
 impl FontInfo {
@@ -235,6 +256,18 @@ impl FontInfo {
     pub fn charmap_index(&self) -> CharmapIndex {
         self.charmap_index
     }
+
+    /// Whether this face is eligible for `codepoint` under its `unicode-range` descriptor.
+    pub fn matches_unicode_range(&self, codepoint: u32) -> bool {
+        self.unicode_ranges
+            .as_ref()
+            .is_none_or(|ranges| ranges.iter().any(|range| range.contains(codepoint)))
+    }
+
+    /// The `unicode-range` intervals attached at registration, if any.
+    pub fn unicode_ranges(&self) -> Option<&[FontUnicodeRange]> {
+        self.unicode_ranges.as_deref()
+    }
 }
 
 impl FontInfo {
@@ -280,6 +313,7 @@ impl FontInfo {
             axes,
             attr_axes,
             charmap_index,
+            unicode_ranges: None,
         })
     }
 
@@ -310,6 +344,9 @@ impl FontInfo {
         }
         if let Some(weight) = info_override.weight {
             self.weight = weight;
+        }
+        if let Some(unicode_ranges) = info_override.unicode_ranges {
+            self.unicode_ranges = Some(unicode_ranges.to_vec());
         }
         if let Some(axes) = info_override.axes {
             // This is O(n^2) but no font should have enough axes for that to
@@ -508,6 +545,8 @@ pub struct FontInfoOverride<'a> {
     pub style: Option<FontStyle>,
     /// Font weight to be used instead of the one specified in the font itself.
     pub weight: Option<FontWeight>,
+    /// CSS `unicode-range` intervals that constrain where this face is eligible.
+    pub unicode_ranges: Option<&'a [FontUnicodeRange]>,
     /// Default values for the font's variation axes. Axes not included within
     /// the font will be ignored.
     pub axes: Option<&'a [(Tag, f32)]>,
@@ -563,6 +602,29 @@ mod tests {
 
         let synthesis = font.synthesis(font.width(), font.style(), FontWeight::THIN);
         assert!(!synthesis.any());
+    }
+
+    #[test]
+    fn unicode_range_override_uses_inclusive_union_ranges() {
+        let mut font = font_info(ROBOTO);
+        assert!(font.matches_unicode_range('A' as u32));
+        assert!(font.matches_unicode_range(0x1F600));
+
+        let ranges = [
+            FontUnicodeRange::new(0x41, 0x41),
+            FontUnicodeRange::new(0x43, 0x44),
+        ];
+        font.apply_override(&FontInfoOverride {
+            unicode_ranges: Some(&ranges),
+            ..Default::default()
+        });
+
+        assert!(font.matches_unicode_range(0x41));
+        assert!(!font.matches_unicode_range(0x42));
+        assert!(font.matches_unicode_range(0x43));
+        assert!(font.matches_unicode_range(0x44));
+        assert!(!font.matches_unicode_range(0x45));
+        assert!(!font.matches_unicode_range(0x1F600));
     }
 
     #[test]

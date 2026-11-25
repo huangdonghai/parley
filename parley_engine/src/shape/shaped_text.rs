@@ -385,16 +385,28 @@ impl ShapedText {
 
             let vertical_metrics = |glyph_id: u32| -> Option<(f32, f32)> {
                 let glyph_id = GlyphId::new(glyph_id);
-                let advance = (vmtx.as_ref()?.advance(glyph_id)? as f32 / upem
-                    + vertical_delta(glyph_id.to_u32()))
-                .max(0.);
-                let origin = if let Some(vorg) = &vorg {
+                // Upright vertical typesetting advances one em per glyph.
+                // Legacy CJK fonts (STZhongsong 1.325em, STSong 1.301em) carry
+                // oversized vmtx advances meant for their original DTP line
+                // spacing; following them spaces every ideograph apart. The
+                // no-vmtx fallback below is one em as well, so cap at one em
+                // while keeping proportionally narrower upright glyphs.
+                let raw_advance = vmtx.as_ref()?.advance(glyph_id)? as f32 / upem
+                    + vertical_delta(glyph_id.to_u32());
+                let advance = raw_advance.clamp(0., 1.);
+                let mut origin = if let Some(vorg) = &vorg {
                     vorg.vertical_origin_y(glyph_id) as f32 / upem
                 } else {
                     let bounds = glyph_metrics.bounds(glyph_id)?;
                     let top_side_bearing = vmtx.as_ref()?.side_bearing(glyph_id)?;
                     (bounds.y_max + top_side_bearing as f32) / upem
                 };
+                // The origin belongs to the font's own advance box. Shrinking
+                // the box would leave the ink hugging one edge and make
+                // text-spacing-trim measure the blanks (and shift punctuation)
+                // from the wrong side, so recentre the content in the shorter
+                // box.
+                origin -= (raw_advance - advance) * 0.5;
                 Some((origin, advance))
             };
 
@@ -554,19 +566,24 @@ impl ShapedText {
                 let bounds = glyph_metrics.bounds(glyph_id)?;
                 if vertical {
                     let vmtx = vmtx.as_ref()?;
-                    let advance = vmtx.advance(glyph_id)? as f32;
-                    if advance <= 0.0 {
+                    let raw_advance = vmtx.advance(glyph_id)? as f32;
+                    if raw_advance <= 0.0 {
                         return None;
                     }
+                    // The same one-em cap and recentring as
+                    // `set_vertical_advances`, so the ink is classified in the
+                    // box it will actually be painted in.
+                    let advance = raw_advance.min(upem);
                     // Distance from the top of the advance box to the glyph
                     // origin, in font units — the same `VORG`/top-side-bearing
                     // rule the vertical origin uses in `set_vertical_advances`.
-                    let origin = if let Some(vorg) = &vorg {
+                    let mut origin = if let Some(vorg) = &vorg {
                         vorg.vertical_origin_y(glyph_id) as f32
                     } else {
                         let top_side_bearing = vmtx.side_bearing(glyph_id)? as f32;
                         bounds.y_max + top_side_bearing
                     };
+                    origin -= (raw_advance - advance) / 2.0;
                     let centre = origin - (bounds.y_min + bounds.y_max) / 2.0;
                     Some(centre / advance)
                 } else {

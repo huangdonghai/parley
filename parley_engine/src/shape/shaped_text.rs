@@ -380,6 +380,7 @@ impl ShapedText {
                     .unwrap_or(0.)
             };
             let glyph_metrics = font_ref.glyph_metrics(Size::unscaled(), LocationRef::default());
+            let advance_cap = upright_advance_cap(&font_ref, upem);
             let fallback_origin = font_size * font_metrics.ascent
                 / (font_metrics.ascent + font_metrics.descent).max(f32::EPSILON);
 
@@ -388,12 +389,12 @@ impl ShapedText {
                 // Upright vertical typesetting advances one em per glyph.
                 // Legacy CJK fonts (STZhongsong 1.325em, STSong 1.301em) carry
                 // oversized vmtx advances meant for their original DTP line
-                // spacing; following them spaces every ideograph apart. The
-                // no-vmtx fallback below is one em as well, so cap at one em
-                // while keeping proportionally narrower upright glyphs.
+                // spacing; following them spaces every ideograph apart. Cap at
+                // what the ink of a representative ideograph needs, which
+                // keeps the one-em rhythm for those fonts without flattening
+                // fonts whose ideographs are actually taller than an em.
                 let raw_advance = vmtx.as_ref()?.advance(glyph_id)? as f32 / upem
                     + vertical_delta(glyph_id.to_u32());
-                let advance = raw_advance.clamp(0., 1.);
                 let mut origin = if let Some(vorg) = &vorg {
                     vorg.vertical_origin_y(glyph_id) as f32 / upem
                 } else {
@@ -401,11 +402,24 @@ impl ShapedText {
                     let top_side_bearing = vmtx.as_ref()?.side_bearing(glyph_id)?;
                     (bounds.y_max + top_side_bearing as f32) / upem
                 };
+                if raw_advance <= 0. {
+                    // Some CJK fonts end their vmtx with a zero advance and a
+                    // zero top side bearing, and every glyph past the long
+                    // metrics inherits it (老報宋_多看: 26k ideographs). The
+                    // zero is a missing metric, not a zero-height box: advance
+                    // one em with the ink top on the box top, as the zero side
+                    // bearing describes. Shifting the origin here would move
+                    // punctuation written in the top half of the box into the
+                    // wrong half and make text-spacing-trim measure the wrong
+                    // blanks.
+                    return Some((origin, 1.));
+                }
                 // The origin belongs to the font's own advance box. Shrinking
                 // the box would leave the ink hugging one edge and make
                 // text-spacing-trim measure the blanks (and shift punctuation)
                 // from the wrong side, so recentre the content in the shorter
                 // box.
+                let advance = raw_advance.min(advance_cap);
                 origin -= (raw_advance - advance) * 0.5;
                 Some((origin, advance))
             };
@@ -480,13 +494,7 @@ impl ShapedText {
                         advance += glyph_advance;
                     }
                     let trim_blanks = if trim_class != SpacingTrimClass::Other {
-                        vertical_trim_blanks(
-                            &glyph_metrics,
-                            first_glyph_id,
-                            origin,
-                            advance,
-                            scale,
-                        )
+                        vertical_trim_blanks(&glyph_metrics, first_glyph_id, origin, advance, scale)
                     } else {
                         None
                     };
@@ -557,6 +565,7 @@ impl ShapedText {
             let vmtx = font_ref.vmtx().ok();
             let vorg = font_ref.vorg().ok();
             let glyph_metrics = font_ref.glyph_metrics(Size::unscaled(), LocationRef::default());
+            let advance_cap = upright_advance_cap(&font_ref, upem);
 
             // Centre of the glyph's ink measured from the start of its advance
             // box, as a fraction of that advance, along the axis it will be
@@ -567,13 +576,16 @@ impl ShapedText {
                 if vertical {
                     let vmtx = vmtx.as_ref()?;
                     let raw_advance = vmtx.advance(glyph_id)? as f32;
-                    if raw_advance <= 0.0 {
-                        return None;
-                    }
-                    // The same one-em cap and recentring as
+                    // The same ink-based cap, zero fallback and recentring as
                     // `set_vertical_advances`, so the ink is classified in the
                     // box it will actually be painted in.
-                    let advance = raw_advance.min(upem);
+                    let advance = if raw_advance > 0.0 {
+                        (raw_advance / upem).min(advance_cap) * upem
+                    } else {
+                        // The same missing-metric fallback as
+                        // `set_vertical_advances`: one em, ink on the box top.
+                        upem
+                    };
                     // Distance from the top of the advance box to the glyph
                     // origin, in font units — the same `VORG`/top-side-bearing
                     // rule the vertical origin uses in `set_vertical_advances`.
@@ -583,7 +595,9 @@ impl ShapedText {
                         let top_side_bearing = vmtx.side_bearing(glyph_id)? as f32;
                         bounds.y_max + top_side_bearing
                     };
-                    origin -= (raw_advance - advance) / 2.0;
+                    if raw_advance > 0.0 {
+                        origin -= (raw_advance - advance) / 2.0;
+                    }
                     let centre = origin - (bounds.y_min + bounds.y_max) / 2.0;
                     Some(centre / advance)
                 } else {
@@ -1042,6 +1056,25 @@ fn horizontal_trim_blanks(
 ///
 /// The vertical origin is the pen position, measured downwards. Font bounds
 /// use a Y-up coordinate system, so the ink's top is `origin - y_max`.
+/// The largest upright vertical advance a font needs, in ems: the ink height
+/// of a representative ideograph plus a little padding, and never below one em.
+///
+/// `水` has a long vertical stroke and side strokes, so its ink stands in for
+/// the ideographs a page sets. Legacy CJK fonts pad their vmtx advances up to
+/// their line height (STZhongsong 1.325em against 0.94em of ink); fonts drawn
+/// taller than one em (仲春仿宋 1.059em against 1.03em of ink) keep their own
+/// advance under this cap.
+fn upright_advance_cap(font_ref: &skrifa::raw::FontRef<'_>, upem: f32) -> f32 {
+    const PADDING: f32 = 0.05;
+    let ink = font_ref.charmap().map('水').and_then(|glyph_id| {
+        font_ref
+            .glyph_metrics(Size::unscaled(), LocationRef::default())
+            .bounds(glyph_id)
+            .map(|bounds| (bounds.y_max - bounds.y_min) / upem)
+    });
+    ink.map_or(1.0, |ink| (ink + PADDING).max(1.0))
+}
+
 fn vertical_trim_blanks(
     glyph_metrics: &GlyphMetrics<'_>,
     glyph_id: u32,

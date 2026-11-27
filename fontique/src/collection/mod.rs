@@ -25,6 +25,7 @@ use crate::{AtomicCounter, CounterInt};
 use alloc::{string::String, sync::Arc, vec::Vec};
 use hashbrown::HashMap;
 use read_fonts::types::NameId;
+use read_fonts::{FontRef, TableProvider as _};
 #[cfg(feature = "std")]
 use std::path::Path;
 #[cfg(feature = "std")]
@@ -213,6 +214,22 @@ impl Collection {
         info_override: Option<FontInfoOverride<'_>>,
     ) -> Vec<(FamilyId, Vec<FontInfo>)> {
         self.inner.register_fonts(data, info_override)
+    }
+
+    /// Registers one face of a font file.
+    ///
+    /// [`Self::register_fonts`] registers every face in the blob, which makes
+    /// the regional faces of a collection (a `.ttc`) collapse onto the first
+    /// one when they share an override family, weight and style. This keeps
+    /// the face selected by `index`, so an alias can point at one face of a
+    /// collection.
+    pub fn register_font_face(
+        &mut self,
+        data: Blob<u8>,
+        index: u32,
+        info_override: Option<FontInfoOverride<'_>>,
+    ) -> Vec<(FamilyId, Vec<FontInfo>)> {
+        self.inner.register_font_face(data, index, info_override)
     }
 
     /// Unregisters the font with the given attributes from the given family.
@@ -542,6 +559,28 @@ impl Inner {
         self.data.register_fonts(data, info_override)
     }
 
+    pub fn register_font_face(
+        &mut self,
+        data: Blob<u8>,
+        index: u32,
+        info_override: Option<FontInfoOverride<'_>>,
+    ) -> Vec<(FamilyId, Vec<FontInfo>)> {
+        #[cfg(feature = "std")]
+        if let Some(shared) = &self.shared {
+            let result = shared
+                .data
+                .lock()
+                .unwrap()
+                .register_font_face(data, index, info_override);
+            shared.bump_version();
+            result
+        } else {
+            self.data.register_font_face(data, index, info_override)
+        }
+        #[cfg(not(feature = "std"))]
+        self.data.register_font_face(data, index, info_override)
+    }
+
     /// Unregisters the font with the given attributes from the given family.
     ///
     /// Returns true if a font was removed from the family, false otherwise.
@@ -747,6 +786,49 @@ impl CommonData {
                 &mut families,
             );
         });
+
+        self.merge_families(&families);
+
+        families
+            .into_iter()
+            .map(|(id, (_, fonts))| (id, fonts))
+            .collect()
+    }
+
+    fn register_font_face(
+        &mut self,
+        data: Blob<u8>,
+        index: u32,
+        info_override: Option<FontInfoOverride<'_>>,
+    ) -> Vec<(FamilyId, Vec<FontInfo>)> {
+        let mut families: HashMap<FamilyId, (FamilyName, Vec<FontInfo>)> = HashMap::default();
+        let mut scratch_family_name = String::default();
+
+        let source = SourceInfo {
+            id: SourceId::new(),
+            kind: SourceKind::Memory(data.clone()),
+        };
+
+        let Ok(font) = FontRef::from_index(data.as_ref(), index) else {
+            return Vec::new();
+        };
+        let Ok(name_table) = font.name() else {
+            return Vec::new();
+        };
+        let scanned_font = crate::scan::ScannedFont {
+            font,
+            #[cfg(feature = "std")]
+            path: None,
+            index,
+            name_table,
+        };
+        self.register_scanned_font(
+            &scanned_font,
+            &source,
+            info_override,
+            &mut scratch_family_name,
+            &mut families,
+        );
 
         self.merge_families(&families);
 
